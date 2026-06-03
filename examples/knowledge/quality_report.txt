@@ -1,0 +1,41 @@
+T2C 前三回提取质量报告
+============================================================
+
+[grounding] hongloumeng_ent_0012: Entity name '吴玉峰' not found in source segments
+[grounding] hongloumeng_ent_0021: Entity name '甄家' not found in source segments
+[grounding] hongloumeng_ent_0076: Entity name '贾化' not found in source segments
+[grounding] hongloumeng_ent_0081: Entity name '林黛玉' not found in source segments
+[grounding] hongloumeng_ent_0085: Entity name '智通寺' not found in source segments
+[grounding] hongloumeng_ent_0086: Entity name '对联' not found in source segments
+[grounding] hongloumeng_ent_0106: Entity name '史氏' not found in source segments
+[grounding] hongloumeng_ent_0111: Entity name '贾宝玉' not found in source segments
+[grounding] hongloumeng_ent_0121: Entity name '甄宝玉' not found in source segments
+[grounding] hongloumeng_ent_0125: Entity name '甄宝玉之父' not found in source segments
+[grounding] hongloumeng_ent_0126: Entity name '甄宝玉之祖母' not found in source segments
+[grounding] hongloumeng_ent_0128: Entity name '贾元春' not found in source segments
+[grounding] hongloumeng_ent_0129: Entity name '贾迎春' not found in source segments
+[grounding] hongloumeng_ent_0130: Entity name '贾探春' not found in source segments
+[grounding] hongloumeng_ent_0131: Entity name '贾惜春' not found in source segments
+[grounding] hongloumeng_ent_0133: Entity name '贾珠遗腹子' not found in source segments
+[grounding] hongloumeng_ent_0135: Entity name '王熙凤' not found in source segments
+[ref] hongloumeng_clm_0093: Claim object '女儿是水作的骨肉，男人是泥作的骨肉' not in known entities
+[ref] hongloumeng_clm_0098: Claim object '富而好礼之家' not in known entities
+[grounding] hongloumeng_ent_0157: Entity name '贾迎春' not found in source segments
+[grounding] hongloumeng_ent_0158: Entity name '贾探春' not found in source segments
+[grounding] hongloumeng_ent_0159: Entity name '贾惜春' not found in source segments
+[grounding] hongloumeng_ent_0184: Entity name '贾赦院' not found in source segments
+[grounding] hongloumeng_ent_0190: Entity name '东边三间耳房' not found in source segments
+[grounding] hongloumeng_ent_0210: Entity name '半旧的青缎靠背引枕' not found in source segments
+[entity] hongloumeng_ent_0016: Entity '城' has different IDs across chapters: Ch1=hongloumeng_ent_0016, Ch2=hongloumeng_ent_0138
+[entity] hongloumeng_ent_0021: Entity '甄家' has different IDs across chapters: Ch1=hongloumeng_ent_0021, Ch2=hongloumeng_ent_0118
+[entity] hongloumeng_ent_0042: Entity '丫鬟' has different IDs across chapters: Ch1=hongloumeng_ent_0042, Ch2=hongloumeng_ent_0075
+[entity] hongloumeng_ent_0048: Entity '荐书' has different IDs across chapters: Ch1=hongloumeng_ent_0048, Ch3=hongloumeng_ent_0142
+[entity] hongloumeng_ent_0069: Entity '太爷' has different IDs across chapters: Ch1=hongloumeng_ent_0069, Ch2=hongloumeng_ent_0076
+[entity] hongloumeng_ent_0092: Entity '金陵' has different IDs across chapters: Ch2=hongloumeng_ent_0092, Ch3=hongloumeng_ent_0265
+[entity] hongloumeng_ent_0103: Entity '贾赦' has different IDs across chapters: Ch2=hongloumeng_ent_0103, Ch3=hongloumeng_ent_0172
+[entity] hongloumeng_ent_0112: Entity '玉' has different IDs across chapters: Ch2=hongloumeng_ent_0112, Ch3=hongloumeng_ent_0260
+[entity] hongloumeng_ent_0120: Entity '金陵城' has different IDs across chapters: Ch2=hongloumeng_ent_0120, Ch3=hongloumeng_ent_0265
+[entity] hongloumeng_ent_0122: Entity '小厮' has different IDs across chapters: Ch2=hongloumeng_ent_0122, Ch3=hongloumeng_ent_0174
+[entity] hongloumeng_ent_0129: Entity '贾迎春' has different IDs across chapters: Ch2=hongloumeng_ent_0129, Ch3=hongloumeng_ent_0157
+[entity] hongloumeng_ent_0130: Entity '贾探春' has different IDs across chapters: Ch2=hongloumeng_ent_0130, Ch3=hongloumeng_ent_0158
+[entity] hongloumeng_ent_0131: Entity '贾惜春' has different IDs across chapters: Ch2=hongloumeng_ent_0131, Ch3=hongloumeng_ent_0159

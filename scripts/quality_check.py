@@ -1,0 +1,385 @@
+#!/usr/bin/env python3
+"""Quality check: compare extracted knowledge code against raw text for grounding & integrity."""
+from __future__ import annotations
+
+import re
+import sys
+from collections import defaultdict
+from pathlib import Path
+
+project_root = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(project_root))
+
+from t2c.corpus import CorpusManager
+from t2c.ontology import Claim, Entity, Event, Relation, Segment
+from t2c.parser import T2CParser
+from t2c.segmenter import Segmenter
+
+
+def load_raw_text() -> str:
+    raw_path = project_root / "rawtxt" / "红楼梦.txt"
+    return raw_path.read_text(encoding="utf-8")
+
+
+def find_chapter_boundaries(raw_text: str) -> list[tuple[int, str, int, int]]:
+    chapters = list(re.finditer(r"第[一二三四五六七八九十百千零\d]+回", raw_text))
+    boundaries = []
+    for i, m in enumerate(chapters):
+        title = raw_text[m.start():m.start() + 40].split("\n")[0].strip()
+        start = m.start()
+        end = chapters[i + 1].start() if i + 1 < len(chapters) else len(raw_text)
+        boundaries.append((i + 1, title, start, end))
+    return boundaries
+
+
+def build_all_data(raw_text: str) -> tuple[dict[str, str], list[Segment]]:
+    """Build segment map and segment objects once."""
+    cm = CorpusManager()
+    doc, _ = cm.ingest_text(raw_text, "hongloumeng")
+    blocks = cm.create_blocks(doc, raw_text)
+    seg = Segmenter()
+    all_segs: list[Segment] = []
+    for b in blocks:
+        bt = raw_text[b.start_offset:b.end_offset]
+        all_segs.extend(seg.segment_block(doc.id, b, bt))
+    seg_map = {s.id: s.text_slice for s in all_segs}
+    return seg_map, all_segs
+
+
+def parse_knowledge_file(path: Path) -> dict[str, list]:
+    """Parse a .t2c.py knowledge file into typed lists."""
+    from t2c.schema import SchemaValidator
+    code = path.read_text(encoding="utf-8")
+    parser = T2CParser()
+    raw_objects = parser.parse_string(code)
+
+    # Group by type
+    entities_raw = [o for o in raw_objects if o.get("type") == "Entity"]
+    events_raw = [o for o in raw_objects if o.get("type") == "Event"]
+    claims_raw = [o for o in raw_objects if o.get("type") == "Claim"]
+    relations_raw = [o for o in raw_objects if o.get("type") == "Relation"]
+
+    # Validate and construct Pydantic models
+    sv = SchemaValidator()
+    entities, _ = sv.validate_and_construct(entities_raw)
+    events, _ = sv.validate_and_construct(events_raw)
+    claims, _ = sv.validate_and_construct(claims_raw)
+    relations, _ = sv.validate_and_construct(relations_raw)
+
+    return {"entities": entities, "events": events, "claims": claims, "relations": relations}
+
+
+def check_grounding(
+    objects: dict[str, list],
+    seg_map: dict[str, str],
+) -> list[dict]:
+    """A. Text grounding: verify names/aliases appear in source segments."""
+    issues = []
+
+    for ent in objects["entities"]:
+        seg_ids = [sid for sid in ent.source_segment_ids if sid in seg_map]
+        if not seg_ids:
+            issues.append({
+                "dim": "grounding",
+                "obj_id": ent.id,
+                "detail": f"Entity '{ent.name}': no valid source_segment_ids",
+            })
+            continue
+        combined = " ".join(seg_map[sid] for sid in seg_ids)
+
+        if ent.name not in combined:
+            issues.append({
+                "dim": "grounding",
+                "obj_id": ent.id,
+                "detail": f"Entity name '{ent.name}' not found in source segments",
+            })
+        for alias in (ent.aliases or []):
+            if alias not in combined:
+                issues.append({
+                    "dim": "grounding",
+                    "obj_id": ent.id,
+                    "detail": f"Entity alias '{alias}' (of '{ent.name}') not found in source segments",
+                })
+
+    return issues
+
+
+def check_referential_integrity(
+    objects: dict[str, list],
+    seg_ids_set: set[str],
+    all_entity_ids: set[str] | None = None,
+) -> list[dict]:
+    """B. Referential integrity: verify all ID references exist.
+
+    all_entity_ids: if provided, includes entities from ALL chapters (cross-chapter refs are valid).
+    """
+    issues = []
+    entity_ids = {e.id for e in objects["entities"]}
+    # If cross-chapter entity IDs are available, merge them
+    valid_entity_ids = entity_ids | (all_entity_ids or set())
+    claim_ids = {c.id for c in objects["claims"]}
+
+    for ent in objects["entities"]:
+        for sid in ent.source_segment_ids:
+            if sid not in seg_ids_set:
+                issues.append({
+                    "dim": "ref",
+                    "obj_id": ent.id,
+                    "detail": f"Entity '{ent.name}' references non-existent segment '{sid}'",
+                })
+
+    for evt in objects["events"]:
+        for sid in evt.source_segment_ids:
+            if sid not in seg_ids_set:
+                issues.append({
+                    "dim": "ref",
+                    "obj_id": evt.id,
+                    "detail": f"Event '{evt.name}' references non-existent segment '{sid}'",
+                })
+        for pid in (evt.participants or []):
+            if pid not in valid_entity_ids:
+                issues.append({
+                    "dim": "ref",
+                    "obj_id": evt.id,
+                    "detail": f"Event '{evt.name}' references non-existent entity '{pid}'",
+                })
+
+    for clm in objects["claims"]:
+        for sid in clm.source_segment_ids:
+            if sid not in seg_ids_set:
+                issues.append({
+                    "dim": "ref",
+                    "obj_id": clm.id,
+                    "detail": f"Claim references non-existent segment '{sid}'",
+                })
+        if clm.subject and clm.subject not in valid_entity_ids:
+            issues.append({
+                "dim": "ref",
+                "obj_id": clm.id,
+                "detail": f"Claim subject '{clm.subject}' not in known entities",
+            })
+        if clm.object and clm.object not in valid_entity_ids:
+            issues.append({
+                "dim": "ref",
+                "obj_id": clm.id,
+                "detail": f"Claim object '{clm.object}' not in known entities",
+            })
+
+    for rel in objects["relations"]:
+        if rel.subject and rel.subject not in valid_entity_ids:
+            issues.append({
+                "dim": "ref",
+                "obj_id": rel.id,
+                "detail": f"Relation subject '{rel.subject}' not in known entities",
+            })
+        if rel.object and rel.object not in valid_entity_ids:
+            issues.append({
+                "dim": "ref",
+                "obj_id": rel.id,
+                "detail": f"Relation object '{rel.object}' not in known entities",
+            })
+        if rel.claim_id and rel.claim_id not in claim_ids:
+            issues.append({
+                "dim": "ref",
+                "obj_id": rel.id,
+                "detail": f"Relation claim_id '{rel.claim_id}' not in chapter claims",
+            })
+
+    return issues
+
+
+def check_coverage(
+    objects: dict[str, list],
+    ch_seg_ids: set[str],
+) -> tuple[float, list[str]]:
+    """C. Coverage: percentage of segments referenced by at least one object."""
+    referenced = set()
+    for ent in objects["entities"]:
+        referenced.update(ent.source_segment_ids)
+    for evt in objects["events"]:
+        referenced.update(evt.source_segment_ids)
+    for clm in objects["claims"]:
+        referenced.update(clm.source_segment_ids)
+
+    referenced_in_ch = referenced & ch_seg_ids
+    coverage = len(referenced_in_ch) / len(ch_seg_ids) if ch_seg_ids else 0.0
+    unreferenced = sorted(ch_seg_ids - referenced_in_ch)
+
+    return coverage, unreferenced
+
+
+def check_entity_consistency(
+    chapter_objects: dict[int, dict[str, list]],
+) -> list[dict]:
+    """D. Entity consistency across chapters: detect duplicate entities."""
+    issues = []
+    name_chapters: dict[str, dict[int, str]] = defaultdict(dict)
+
+    for ch_num, objects in chapter_objects.items():
+        for ent in objects["entities"]:
+            name_chapters[ent.name][ch_num] = ent.id
+            for alias in (ent.aliases or []):
+                name_chapters[alias][ch_num] = ent.id
+
+    for name, ch_map in name_chapters.items():
+        unique_ids = set(ch_map.values())
+        if len(unique_ids) > 1:
+            chapters_str = ", ".join(f"Ch{ch}={eid}" for ch, eid in sorted(ch_map.items()))
+            issues.append({
+                "dim": "entity",
+                "obj_id": list(ch_map.values())[0],
+                "detail": f"Entity '{name}' has different IDs across chapters: {chapters_str}",
+            })
+
+    return issues
+
+
+def run_quality_check():
+    print("Loading raw text...")
+    raw_text = load_raw_text()
+    print(f"  Total: {len(raw_text):,} characters")
+
+    print("Building segment map...")
+    seg_map, all_segs = build_all_data(raw_text)
+    print(f"  Total segments: {len(seg_map):,}")
+
+    print("Finding chapter boundaries...")
+    boundaries = find_chapter_boundaries(raw_text)
+    print(f"  Total chapters: {len(boundaries)}")
+
+    output_dir = project_root / "examples" / "knowledge"
+
+    chapter_nums = [1, 2, 3]
+    chapter_objects: dict[int, dict[str, list]] = {}
+    all_issues: list[dict] = []
+    all_entity_ids: set[str] = set()
+
+    # First pass: parse all chapter knowledge files to build all_entity_ids
+    for ch_num in chapter_nums:
+        kf = output_dir / f"hongloumeng_ch{ch_num:02d}.knowledge.t2c.py"
+        if not kf.exists():
+            continue
+        objects = parse_knowledge_file(kf)
+        chapter_objects[ch_num] = objects
+        all_entity_ids.update(e.id for e in objects["entities"])
+
+    # Second pass: run quality checks per chapter
+    for ch_num in chapter_nums:
+        if ch_num not in chapter_objects:
+            print(f"\n  WARNING: Ch{ch_num} knowledge file not found, skipping")
+            continue
+
+        ch_info = None
+        for num, title, start, end in boundaries:
+            if num == ch_num:
+                ch_info = (num, title, start, end)
+                break
+        if not ch_info:
+            print(f"\n  WARNING: Ch{ch_num} boundary not found")
+            continue
+
+        _, ch_title, ch_start, ch_end = ch_info
+        ch_seg_ids = {s.id for s in all_segs
+                      if s.start_offset >= ch_start and s.start_offset < ch_end}
+
+        print(f"\n{'=' * 60}")
+        print(f"质量报告：第{ch_num}回「{ch_title}」")
+        print(f"{'=' * 60}")
+        print(f"  Segments: {len(ch_seg_ids)}")
+
+        objects = chapter_objects[ch_num]
+        print(f"  Entities: {len(objects['entities'])}, Events: {len(objects['events'])}, "
+              f"Claims: {len(objects['claims'])}, Relations: {len(objects['relations'])}")
+
+        # A. Grounding
+        grounding_issues = check_grounding(objects, seg_map)
+        total_names_aliases = sum(1 + len(e.aliases or []) for e in objects["entities"])
+        grounding_rate = 1.0 - (len(grounding_issues) / max(1, total_names_aliases))
+        print(f"\n  A. 文本溯源命中率: {grounding_rate:.0%}")
+        if grounding_issues:
+            print(f"     问题: {len(grounding_issues)}")
+            for iss in grounding_issues[:5]:
+                print(f"     - {iss['detail']}")
+            if len(grounding_issues) > 5:
+                print(f"     ... and {len(grounding_issues) - 5} more")
+        all_issues.extend(grounding_issues)
+
+        # B. Referential integrity
+        ref_issues = check_referential_integrity(objects, set(seg_map.keys()), all_entity_ids)
+        # Count total references checked
+        ref_total = 0
+        for e in objects["entities"]:
+            ref_total += len(e.source_segment_ids)
+        for evt in objects["events"]:
+            ref_total += len(evt.source_segment_ids) + len(evt.participants or [])
+        for c in objects["claims"]:
+            ref_total += len(c.source_segment_ids) + (1 if c.subject else 0) + (1 if c.object else 0)
+        for r in objects["relations"]:
+            ref_total += (1 if r.subject else 0) + (1 if r.object else 0) + (1 if r.claim_id else 0)
+        ref_pass = ref_total - len(ref_issues)
+        print(f"\n  B. 引用完整性: {ref_pass}/{ref_total}")
+        if ref_issues:
+            print(f"     问题: {len(ref_issues)}")
+            for iss in ref_issues[:5]:
+                print(f"     - {iss['detail']}")
+            if len(ref_issues) > 5:
+                print(f"     ... and {len(ref_issues) - 5} more")
+        all_issues.extend(ref_issues)
+
+        # C. Coverage
+        coverage, unreferenced = check_coverage(objects, ch_seg_ids)
+        print(f"\n  C. 覆盖率: {coverage:.0%} ({len(ch_seg_ids) - len(unreferenced)}/{len(ch_seg_ids)} segments)")
+        if unreferenced and len(unreferenced) <= 10:
+            print(f"     未引用 segments: {unreferenced}")
+        elif unreferenced:
+            print(f"     未引用 segments: {len(unreferenced)} total (showing first 5)")
+            for sid in unreferenced[:5]:
+                txt = seg_map.get(sid, "?")[:40]
+                print(f"     - {sid}: {txt}...")
+
+        # D. Event density
+        evt_count = len(objects["events"])
+        seg_count = len(ch_seg_ids)
+        evt_ratio = evt_count / seg_count if seg_count else 0
+        print(f"\n  D. 事件密度: {evt_count} events / {seg_count} segments = {evt_ratio:.2f}")
+
+    # Cross-chapter entity consistency
+    if len(chapter_objects) > 1:
+        print(f"\n{'=' * 60}")
+        print("跨章实体一致性检查")
+        print(f"{'=' * 60}")
+        entity_issues = check_entity_consistency(chapter_objects)
+        if entity_issues:
+            print(f"  问题: {len(entity_issues)}")
+            for iss in entity_issues[:10]:
+                print(f"  - {iss['detail']}")
+            if len(entity_issues) > 10:
+                print(f"  ... and {len(entity_issues) - 10} more")
+        else:
+            print("  无跨章实体冲突")
+        all_issues.extend(entity_issues)
+
+    # Summary
+    print(f"\n{'=' * 60}")
+    print("汇总")
+    print(f"{'=' * 60}")
+    by_dim = defaultdict(int)
+    for iss in all_issues:
+        by_dim[iss["dim"]] += 1
+    for dim, count in sorted(by_dim.items()):
+        print(f"  {dim}: {count} issues")
+    total = len(all_issues)
+    print(f"  总计: {total} issues")
+
+    # Write detailed report
+    report_path = output_dir / "quality_report.txt"
+    with open(report_path, "w", encoding="utf-8") as f:
+        f.write("T2C 前三回提取质量报告\n")
+        f.write("=" * 60 + "\n\n")
+        for iss in all_issues:
+            f.write(f"[{iss['dim']}] {iss['obj_id']}: {iss['detail']}\n")
+    print(f"\n详细报告已写入: {report_path}")
+
+
+if __name__ == "__main__":
+    run_quality_check()
