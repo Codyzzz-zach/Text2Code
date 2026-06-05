@@ -23,7 +23,8 @@ def _sha256(text: str) -> str:
 
 def test_multi_file_codegen_parser_validator_roundtrip():
     """Full pipeline: codegen → parser → validator across text/entities/claims."""
-    gen = CodeGenerator(version="v3.3-flash")
+    # v3.3 mode: emit symbol refs in EvidenceRef (opt-in via flag)
+    gen = CodeGenerator(version="v3.3-flash", emit_symbol_refs=True)
 
     # --- Build text code ---
     doc = Document(
@@ -116,7 +117,8 @@ def test_multi_file_codegen_parser_validator_roundtrip():
 
 def test_codegen_v33_output_contains_symbol_refs():
     """Generated v3.3 code must contain real Python symbol references."""
-    gen = CodeGenerator(version="v3.3-flash")
+    # v3.3 mode: emit symbol refs in EvidenceRef (opt-in via flag)
+    gen = CodeGenerator(version="v3.3-flash", emit_symbol_refs=True)
     seg = Segment(
         id="seg1", doc_id="doc1", block_index=0,
         segment_type="sentence", start_offset=0, end_offset=9,

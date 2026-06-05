@@ -83,7 +83,8 @@ class TestV33CodeGeneration:
         assert nums == sorted(nums), f"Segment symbols not sequential: {seg_syms}"
 
     def test_entity_with_evidence_symbol_ref(self):
-        gen = CodeGenerator(version="v3.3-flash")
+        # v3.3 mode: emit symbol refs in EvidenceRef. Opt-in via flag.
+        gen = CodeGenerator(version="v3.3-flash", emit_symbol_refs=True)
         seg = Segment(
             id="seg1", doc_id="doc1", block_index=0,
             segment_type="sentence", start_offset=0, end_offset=9,
@@ -105,7 +106,7 @@ class TestV33CodeGeneration:
         code = files["entities.py"]
         # Must be valid Python
         compile(code, "<entities.py>", "exec")
-        # Must contain symbol ref: segment=seg_0000
+        # v3.3 mode: keyword is v3.3 alias 'segment' and value is symbol ref
         assert "segment=seg_0000" in code
         # Must import from .text
         assert "from .text import seg_0000" in code

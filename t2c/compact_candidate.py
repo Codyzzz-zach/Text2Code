@@ -351,18 +351,36 @@ def locate_quote(
     shortest surrounding context window (i.e. the first occurrence); if
     there are zero, return None. We use `str.find` rather than regex so
     we don't have to think about escaping.
+
+    v4.0: callers should use `locate_quote_with_ambiguity` to get an
+    ambiguity flag — silent ambiguity is the kind of "looks like it
+    works" bug we want to surface.
     """
     if not quote:
         return None
     idx = segment_text.find(quote)
     if idx < 0:
         return None
-    # Check for additional occurrences; if more than one, still take the
-    # first but downstream code can detect this via the "ambiguous" flag.
-    second = segment_text.find(quote, idx + 1)
-    if second >= 0:
-        return (idx, idx + len(quote))  # ambiguous, but first match is OK
     return (idx, idx + len(quote))
+
+
+def locate_quote_with_ambiguity(
+    segment_text: str, quote: str
+) -> tuple[tuple[int, int], bool] | None:
+    """Like locate_quote, but also returns whether the match was ambiguous.
+
+    Returns:
+        None → no match
+        ((start, end), False) → unique match
+        ((start, end), True) → first match, but more matches exist
+    """
+    if not quote:
+        return None
+    idx = segment_text.find(quote)
+    if idx < 0:
+        return None
+    second = segment_text.find(quote, idx + 1)
+    return ((idx, idx + len(quote)), second >= 0)
 
 
 def build_evidence_refs(
@@ -391,10 +409,14 @@ def build_evidence_refs(
             text = getattr(seg, "text_slice", None)
             if not text:
                 continue
-            span = locate_quote(text, q)
-            if span is None:
+            result = locate_quote_with_ambiguity(text, q)
+            if result is None:
                 continue
-            start, end = span
+            (start, end), ambiguous = result
+            if ambiguous:
+                warnings.append(
+                    f"ambiguous quote (multiple matches) for sid={sid} q={q!r}; using first"
+                )
             slice_ = text[start:end]
             if slice_ != q:
                 warnings.append(

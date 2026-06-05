@@ -253,8 +253,28 @@ class LLMExtractor:
         prompt_version: str | None = None,
         cache_mode: CacheMode | str | None = None,
         cache_dir: str | None = None,
+        config: Any = None,
         _client: Any = None,
     ) -> None:
+        # v4.0: config-first construction. If a config is provided, its
+        # fields take precedence over individual kwargs.
+        if config is not None:
+            model = model if model != "MiniMax-M3" else config.model
+            api_key = api_key or config.api_key or None
+            base_url = base_url or config.base_url or None
+            if max_tokens is None and config.max_tokens is not None:
+                max_tokens = config.max_tokens
+            if thinking_budget is None and config.thinking_budget is not None:
+                thinking_budget = config.thinking_budget
+            if extractor_protocol is None and config.extractor_protocol is not None:
+                extractor_protocol = config.extractor_protocol
+            if prompt_version is None and config.prompt_version is not None:
+                prompt_version = config.prompt_version
+            if cache_mode is None and config.cache_mode is not None:
+                cache_mode = config.cache_mode
+            if cache_dir is None and config.cache_dir is not None:
+                cache_dir = config.cache_dir
+
         if _client is not None:
             self._client = _client
         else:

@@ -1,2 +1,2 @@
-"""Text2Code cognitive engine v3.2-flash."""
-__version__ = "0.1.0"
+"""Text2Code — transform natural language into executable Knowledge Code."""
+__version__ = "0.4.0"

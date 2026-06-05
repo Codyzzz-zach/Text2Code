@@ -1,13 +1,44 @@
+# Python
 __pycache__/
 *.pyc
 *.pyo
+*.pyd
 .pytest_cache/
 *.egg-info/
 dist/
 build/
-.env
 .venv/
 venv/
+
+# Environment & secrets
+.env
+.env.local
+.env.*.local
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# T2C runtime cache
+.t2c_cache/
+
+# LLM-generated knowledge code (regenerate via scripts)
+examples/knowledge/**/*.t2c.py
+examples/knowledge/**/quality_report.txt
+
+# Generated data (large files, regenerate via scripts)
+data/generated/
+
+# Logs
 *.log
+
+# Claude / codebase-memory
 .claude/
 .codebase-memory/

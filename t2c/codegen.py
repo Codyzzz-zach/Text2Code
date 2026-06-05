@@ -1,16 +1,76 @@
 """Code Generator — deterministic .t2c.py generation from ontology objects."""
 from __future__ import annotations
 
+import ast
 from typing import Any
 
 from pydantic import BaseModel
 
 from t2c.ontology import (
     Block,
+    CoverageReport,
     Document,
+    Entity,
+    Event,
     EvidenceRef,
+    IgnoreSegment,
+    Relation,
+    Residual,
     Segment,
 )
+
+
+# Module-level helpers used by v4.0 multi-file generation.
+# They scan generated .t2c.py source for symbol names + segment_id mappings
+# so we can wire cross-file imports without re-running the model side.
+def _scan_symbols(source: str) -> list[tuple[str, str]]:
+    """Return [(symbol_name, constructor_type), ...] from generated source."""
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return []
+    out = []
+    for node in tree.body:
+        if isinstance(node, ast.Assign) and isinstance(node.value, ast.Call):
+            target = node.targets[0]
+            if isinstance(target, ast.Name):
+                ctor = node.value.func
+                if isinstance(ctor, ast.Name):
+                    out.append((target.id, ctor.id))
+    return out
+
+
+def _scan_top_level_symbols(source: str) -> list[str]:
+    """Return [symbol_name, ...] from generated source (assignments only)."""
+    return [name for name, _ in _scan_symbols(source)]
+
+
+def _extract_segment_id_symbol_map(source: str) -> dict[str, str]:
+    """Return {segment_id: symbol_name} for Segment assignments.
+
+    Walks the AST and pairs `seg_NNNN = Segment(id='hongloumeng_seg_0009', ...)`
+    so the caller can build the `external_symbols` index for semantic code.
+    """
+    out: dict[str, str] = {}
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return out
+    for node in tree.body:
+        if not isinstance(node, ast.Assign):
+            continue
+        if not isinstance(node.value, ast.Call):
+            continue
+        ctor = node.value.func
+        if not isinstance(ctor, ast.Name) or ctor.id != "Segment":
+            continue
+        target = node.targets[0]
+        if not isinstance(target, ast.Name):
+            continue
+        for kw in node.value.keywords:
+            if kw.arg == "id" and isinstance(kw.value, ast.Constant):
+                out[str(kw.value.value)] = target.id
+    return out
 
 
 # Field order for deterministic output per type
@@ -40,10 +100,15 @@ _DEFAULT_VERSION = "v3.4-flash"
 class CodeGenerator:
     """Deterministically generate .t2c.py from ontology objects."""
 
-    def __init__(self, version: str | None = None) -> None:
+    def __init__(self, version: str | None = None, emit_symbol_refs: bool = False) -> None:
         # Override the default version tag (used in file headers).
         # None → use _DEFAULT_VERSION; pass e.g. "v3.5-flash" to future-proof tests.
         self._version = version or _DEFAULT_VERSION
+        # v4.0 default: emit string literals for all fields so generated
+        # .t2c.py is import-safe under stock Pydantic. The v3.3 mode
+        # (symbol refs in EvidenceRef.segment_id and friends) is opt-in
+        # for tests and the v3.3 pipeline that requires it.
+        self._emit_symbol_refs = emit_symbol_refs
 
     def generate_document_code(
         self,
@@ -141,11 +206,25 @@ class CodeGenerator:
     @staticmethod
     def _normalize_name(name: str) -> str:
         """Try to produce a Python-safe identifier from a name.
-        Falls back to hash if the name contains non-ASCII characters.
+
+        v4.0: prefer the ASCII prefix of the name when available so
+        symbols stay human-readable. E.g. "爱丽丝 (Alice)" → "alice",
+        "甄士隐" → "" (no ASCII) → None (caller falls back to hash).
         """
+        if not name:
+            return None
+        # Pure ASCII path
         if name.isascii() and name.replace("_", "").isalnum():
             return name.lower().replace(" ", "_").replace("-", "_")
-        # Non-ASCII — use hash-based fallback
+        # Mixed: try to extract a Python-safe slug from the ASCII parts.
+        import re
+        # Take any contiguous run of ASCII letters/digits and join with _
+        parts = re.findall(r"[A-Za-z0-9]+", name)
+        if parts:
+            slug = "_".join(parts).lower()
+            if slug:
+                return slug
+        # Pure non-ASCII → caller falls back to hash
         return None
 
     def _compute_symbol_names(
@@ -459,6 +538,8 @@ class CodeGenerator:
 
         # External symbol imports — group by module
         mod_syms: dict[str, list[str]] = {}
+        # Segment symbols always live in .text. Entity/Claim/Event/etc
+        # symbols are looked up by their ID type below.
         for obj in objects:
             # Check evidence_refs for segment symbol refs
             erefs = getattr(obj, "evidence_refs", []) or []
@@ -466,7 +547,10 @@ class CodeGenerator:
                 seg_id = getattr(eref, "segment_id", None)
                 if seg_id and seg_id in ext_syms:
                     seg_sym = ext_syms[seg_id]
-                    mod_syms.setdefault(external_module or ".text", []).append(seg_sym)
+                    # Heuristic: if the symbol is in ext_syms under a segment
+                    # ID, it's a segment → import from .text. (Other types
+                    # aren't passed in ext_syms for the segment ID space.)
+                    mod_syms.setdefault(".text", []).append(seg_sym)
 
             # Check Claim subject/object for entity symbol refs
             if obj.__class__.__name__ == "Claim":
@@ -512,11 +596,16 @@ class CodeGenerator:
         obj: BaseModel,
         all_symbols: dict[str, str],
     ) -> str:
-        """Format a Pydantic object as a v3.3 constructor call with symbol refs.
+        """Format a Pydantic object as a v3.3 constructor call.
 
-        When a field value is an ID that has a symbol mapping, emit the
-        symbol ref instead of the string ID. Keyword names use the
-        codegen keyword (e.g., 'segment' instead of 'segment_id').
+        v4.0 policy: emit STRING LITERALS for all fields so the generated
+        .t2c.py can be imported and validated by stock Pydantic. The
+        cross-file symbol navigation is achieved via the explicit
+        `from .text import seg_0012` import statements in each file —
+        those are the only place symbol refs appear.
+
+        Keyword names use ontology field names (e.g., 'segment_id', not
+        the v3.3 alias 'segment') so Pydantic sees valid fields.
         """
         type_name = obj.__class__.__name__
         fields = FIELD_ORDER.get(type_name, list(obj.__class__.model_fields.keys()))
@@ -538,9 +627,16 @@ class CodeGenerator:
             if isinstance(value, list) and not value and field_name not in ("participants", "evidence_refs"):
                 continue
 
-            # Emit keyword name and formatted value
-            kw_name = self._v33_keyword_name(type_name, field_name)
-            use_symbol = self._is_symbol_ref_field(type_name, field_name)
+            # Use ontology field name + string literal value. v3.3 mode
+            # (opt-in) still emits symbol refs + v3.3 keyword aliases for
+            # fields like EvidenceRef.segment_id. v4.0 default is string
+            # literals for Pydantic safety.
+            if self._emit_symbol_refs:
+                kw_name = self._v33_keyword_name(type_name, field_name)
+                use_symbol = field_name in self._SYMBOL_REF_FIELDS_V33.get(type_name, set())
+            else:
+                kw_name = field_name
+                use_symbol = False
             formatted = self._format_value_v33(value, all_symbols, type_name, field_name, use_symbol)
             kwargs.append(f"{kw_name}={formatted}")
 
@@ -554,7 +650,22 @@ class CodeGenerator:
         return f"{type_name}(\n    {inner}\n)"
 
     # Fields that should be emitted as symbol refs (not string literals)
-    _SYMBOL_REF_FIELDS: dict[str, set[str]] = {
+    # v4.0 default: only top-level subject/object/participants/claim_id
+    # fields use symbol refs. EvidenceRef.segment_id is NOT a symbol-ref
+    # field by default (EvidenceRef is a nested value, not a top-level
+    # symbol, so its segment_id must be a string literal that Pydantic
+    # can validate).
+    #
+    # v3.3 mode (opt-in via emit_symbol_refs=True) restores the original
+    # v3.3 behavior where EvidenceRef.segment_id is also a symbol ref.
+    _SYMBOL_REF_FIELDS_DEFAULT: dict[str, set[str]] = {
+        "Claim": {"subject", "object"},
+        "Event": {"participants"},
+        "Relation": {"subject", "object", "claim_id"},
+        "Residual": {"segment_id"},
+        "IgnoreSegment": {"segment_id"},
+    }
+    _SYMBOL_REF_FIELDS_V33: dict[str, set[str]] = {
         "EvidenceRef": {"segment_id"},
         "Claim": {"subject", "object"},
         "Event": {"participants"},
@@ -580,8 +691,16 @@ class CodeGenerator:
 
     @classmethod
     def _is_symbol_ref_field(cls, type_name: str, field_name: str) -> bool:
-        """Check if a field should be emitted as a symbol ref."""
-        return field_name in cls._SYMBOL_REF_FIELDS.get(type_name, set())
+        """Check if a field should be emitted as a symbol ref.
+
+        Uses v3.3 set (with EvidenceRef.segment_id) when called on a v3.3
+        instance, otherwise the v4.0 default set.
+        """
+        # This is a static helper; the caller (in _format_object_v33) knows
+        # whether we're in v3.3 mode. The caller passes use_symbol directly
+        # in modern code, so this method is retained for compatibility with
+        # tests that may still call it.
+        return field_name in cls._SYMBOL_REF_FIELDS_V33.get(type_name, set())
 
     def _format_value_v33(
         self,
@@ -667,3 +786,174 @@ class CodeGenerator:
         if hasattr(value, "value"):
             return repr(value.value)
         return repr(value)
+
+    # -- v4.0 multi-file compilation ---------------------------------------
+
+    def generate_init_py(
+        self,
+        symbols: dict[str, str],
+    ) -> str:
+        """Generate __init__.py marker file.
+
+        v4.0 policy: do NOT auto-import the module-level symbols. Pydantic
+        models validate at construction time, so importing them at package
+        load can fail-fast on a missing type. Instead, the cross-file
+        `from .text import seg_XXXX` imports inside each module are the
+        codegraph-friendly navigation surface; `__init__.py` is just a
+        package marker so the directory is importable as a namespace.
+        """
+        lines = [
+            f"# Auto-generated by t2c {self._version} — DO NOT EDIT",
+            f"# {len(symbols)} symbols across {len(set(symbols.values()))} modules.",
+            f"# See individual files (text.py, entities.py, claims.py, ...).",
+            "",
+        ]
+        return "\n".join(lines)
+
+    def generate_coverage_code(
+        self,
+        report: CoverageReport,
+    ) -> str:
+        """Generate coverage.py from a CoverageReport Pydantic model."""
+        lines = [
+            f"# Auto-generated by t2c {self._version} — DO NOT EDIT",
+            "from t2c.ontology import CoverageReport",
+            "",
+            self._format_object(report),
+            "",
+        ]
+        return "\n".join(lines)
+
+    def generate_multi_file_compilation(
+        self,
+        doc: Document,
+        blocks: list[Block],
+        segments: list[Segment],
+        entities: list[Entity] | None = None,
+        events: list[Event] | None = None,
+        claims: list[Any] | None = None,
+        residuals: list[Residual] | None = None,
+        ignores: list[IgnoreSegment] | None = None,
+        relations: list[Relation] | None = None,
+        coverage_report: CoverageReport | None = None,
+    ) -> dict[str, str]:
+        """One-stop multi-file Knowledge Code generation.
+
+        Returns dict mapping filename → code string:
+          - text.py
+          - entities.py (if entities)
+          - events.py (if events)
+          - claims.py (if claims)
+          - residuals.py (if residuals or ignores)
+          - derived.py (if relations)
+          - coverage.py (if coverage_report)
+          - __init__.py
+
+        All cross-file references use real Python imports; all objects
+        are symbol assignments — codegraph navigable.
+        """
+        files: dict[str, str] = {}
+
+        # --- text.py ---
+        text_files = self.generate_text_code_v33(doc, blocks, segments)
+        files["text.py"] = text_files["text.py"]
+
+        # Build the cross-file symbol index from text.py.
+        # Parse text.py to extract Document/Block/Segment symbols.
+        text_parser_symbols: dict[str, str] = {}  # {segment_id: symbol_name}
+        for sym_name, type_name in _scan_symbols(files["text.py"]):
+            if type_name == "Segment":
+                # We need segment_id; pull it from the source.
+                # _scan_symbols returns (symbol, type); we re-scan the source.
+                pass
+        # Re-parse text.py to get segment_id → symbol mapping
+        text_source = files["text.py"]
+        seg_id_to_sym = _extract_segment_id_symbol_map(text_source)
+
+        # Collect semantic objects, each will get a symbol in its own file.
+        all_symbols: dict[str, str] = {}  # symbol → relative module
+        # External = segment symbols (defined in .text)
+        for sid, sym in seg_id_to_sym.items():
+            all_symbols[sym] = ".text"
+
+        # --- entities.py ---
+        if entities:
+            # Reuse generate_semantic_code_v33; it partitions by type.
+            # Patch the internal _generate_type_file_v33 path: we go through
+            # the public method, then for multi-file compilation we need to
+            # override the cross-file imports. The easiest path: bypass
+            # generate_semantic_code_v33 (which only handles one type) and
+            # build the file directly.
+            ext_syms = dict(seg_id_to_sym)
+            ent_syms = self._compute_symbol_names(list(entities))
+            ext_syms.update(ent_syms)
+            files["entities.py"] = self._generate_type_file_v33(
+                list(entities), ent_syms, ["Entity", "EvidenceRef"],
+                external_symbols=seg_id_to_sym,
+                external_modules={".text"},
+            )
+            for sym in _scan_top_level_symbols(files["entities.py"]):
+                all_symbols[sym] = ".entities"
+
+        # --- events.py ---
+        if events:
+            evt_syms = self._compute_symbol_names(list(events))
+            ext_syms = dict(seg_id_to_sym)
+            # events reference entity symbols (if any) and segment symbols
+            # We pass ent syms in if available from entities
+            files["events.py"] = self._generate_type_file_v33(
+                list(events), evt_syms, ["Event", "EvidenceRef"],
+                external_symbols=seg_id_to_sym,
+                external_modules={".text"},
+            )
+            for sym in _scan_top_level_symbols(files["events.py"]):
+                all_symbols[sym] = ".events"
+
+        # --- claims.py ---
+        if claims:
+            clm_syms = self._compute_symbol_names(list(claims))
+            # Build the full ext_syms for claims: segments (from .text) + entities
+            # (from .entities). Both lookups happen in _generate_type_file_v33.
+            claim_ext_syms = dict(seg_id_to_sym)
+            if entities:
+                ent_syms_for_claims = self._compute_symbol_names(list(entities))
+                claim_ext_syms.update(ent_syms_for_claims)
+            files["claims.py"] = self._generate_type_file_v33(
+                list(claims), clm_syms, ["Claim", "EvidenceRef"],
+                external_symbols=claim_ext_syms,
+                external_modules={".text", ".entities"},
+            )
+            for sym in _scan_top_level_symbols(files["claims.py"]):
+                all_symbols[sym] = ".claims"
+
+        # --- residuals.py (Residual + IgnoreSegment) ---
+        if residuals or ignores:
+            res_ign = list(residuals or []) + list(ignores or [])
+            res_ign_syms = self._compute_symbol_names(res_ign, seg_symbols=seg_id_to_sym)
+            files["residuals.py"] = self._generate_type_file_v33(
+                res_ign, res_ign_syms, ["Residual", "EvidenceRef"],
+                external_symbols=seg_id_to_sym,
+                external_modules={".text"},
+            )
+            for sym in _scan_top_level_symbols(files["residuals.py"]):
+                all_symbols[sym] = ".residuals"
+
+        # --- derived.py (Relation) ---
+        if relations:
+            rel_syms = self._compute_symbol_names(list(relations))
+            files["derived.py"] = self._generate_type_file_v33(
+                list(relations), rel_syms, ["Relation", "EvidenceRef"],
+                external_symbols=seg_id_to_sym,
+                external_modules={".text", ".entities", ".claims"},
+            )
+            for sym in _scan_top_level_symbols(files["derived.py"]):
+                all_symbols[sym] = ".derived"
+
+        # --- coverage.py ---
+        if coverage_report:
+            files["coverage.py"] = self.generate_coverage_code(coverage_report)
+
+        # --- __init__.py ---
+        files["__init__.py"] = self.generate_init_py(all_symbols)
+
+        return files

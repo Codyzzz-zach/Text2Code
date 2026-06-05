@@ -164,12 +164,14 @@ class Pipeline:
             result.saved_count = saved_count
             result.rejected_count = len(models) - saved_count
 
-        # Step 10: Raw fallback for uncovered segments
-        if not val_result.valid:
-            raw_fallback_ids = self._generate_raw_fallbacks(
-                objects, all_segments, doc_id, val_result.errors
-            )
-            result.raw_fallback_segment_ids = raw_fallback_ids
+        # Step 10: Raw fallback for uncovered segments.
+        # v4.0: always run — uncovers silent loss even when validation passed.
+        # The internal logic distinguishes "validation error" (high importance)
+        # from "uncovered" (medium importance) and labels accordingly.
+        raw_fallback_ids = self._generate_raw_fallbacks(
+            objects, all_segments, doc_id, val_result.errors
+        )
+        result.raw_fallback_segment_ids = raw_fallback_ids
 
         return result
 
@@ -265,6 +267,10 @@ class Pipeline:
         """Generate Residual objects for segments that couldn't be properly structured.
 
         Returns list of segment IDs that got raw fallback treatment.
+
+        v4.0 fix: also produce Residuals for *uncovered* segments
+        (no semantic object, no residual, no ignore). These represent
+        silent loss and must be made visible.
         """
         # Find segments that are referenced by objects with errors
         error_obj_ids: set[str] = set()
@@ -281,24 +287,48 @@ class Pipeline:
                 for seg_id in obj.get("data", {}).get("source_segment_ids", []):
                     fallback_seg_ids.add(seg_id)
 
+        # v4.0: also find segments that no object ever references. These
+        # would be silent loss; we emit a medium-importance Residual so
+        # coverage can label them "raw_only" and they appear in the ledger.
+        referenced_segs: set[str] = set()
+        for obj in objects:
+            for sid in obj.get("data", {}).get("source_segment_ids", []) or []:
+                referenced_segs.add(sid)
+            for eref in obj.get("data", {}).get("evidence_refs", []) or []:
+                sid = eref.get("segment_id") if isinstance(eref, dict) else getattr(eref, "segment_id", None)
+                if sid:
+                    referenced_segs.add(sid)
+        seg_ids = {s.id for s in segments}
+        uncovered_seg_ids = seg_ids - referenced_segs
+        fallback_seg_ids |= uncovered_seg_ids
+
         # Generate Residual objects for these segments
         seg_map = {s.id: s for s in segments}
+        sv = SchemaValidator()
         for seg_id in fallback_seg_ids:
             seg = seg_map.get(seg_id)
             if seg is None:
                 continue
+            if seg_id in uncovered_seg_ids:
+                # Silent loss: no object ever referenced this segment.
+                importance = "medium"
+                category = "structural"
+                reason = "Segment has no semantic object, no Residual, no Ignore — silent loss marker"
+            else:
+                # Validation error forced fallback.
+                importance = "high"
+                category = "structural"
+                reason = "Segment contains information that could not be safely structured due to validation errors"
             residual = {
                 "type": "Residual",
                 "data": {
                     "id": f"{doc_id}_res_raw_{seg_id}",
                     "segment_id": seg_id,
-                    "category": "structural",
-                    "importance": "high",
-                    "reason": "Segment contains information that could not be safely structured due to validation errors",
+                    "category": category,
+                    "importance": importance,
+                    "reason": reason,
                 },
             }
-            # Save directly (raw fallback, not validated)
-            sv = SchemaValidator()
             models, _ = sv.validate_and_construct([residual])
             for m in models:
                 self._store.save(m)
