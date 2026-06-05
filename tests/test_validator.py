@@ -8,16 +8,21 @@ from t2c.segmenter import Segmenter
 from t2c.validator import Validator
 
 
+def _sha256(text: str) -> str:
+    import hashlib
+    return "sha256:" + hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
 class TestSchemaValidation:
     def test_valid_document(self):
         validator = Validator()
-        source = '''\
+        source = f'''\
 from t2c.ontology import Document
 
 Document(
     id="test",
     source_path="test.txt",
-    raw_text_hash="sha256:abc",
+    raw_text_hash="{_sha256("test")}",
     total_length=100,
     block_count=1,
     created_at="2026-05-27T10:00:00Z",
@@ -41,7 +46,7 @@ Document(
 
     def test_wrong_type_field(self):
         validator = Validator()
-        source = '''\
+        source = f'''\
 from t2c.ontology import Block
 
 Block(
@@ -52,7 +57,7 @@ Block(
     start_offset=0,
     end_offset=10,
     text_slice="Hello",
-    hash="sha256:abc",
+    hash="{_sha256("Hello")}",
 )
 '''
         result = validator.validate_string(source)
@@ -60,7 +65,7 @@ Block(
 
     def test_invalid_block_type(self):
         validator = Validator()
-        source = '''\
+        source = f'''\
 from t2c.ontology import Block
 
 Block(
@@ -71,7 +76,7 @@ Block(
     start_offset=0,
     end_offset=10,
     text_slice="Hello",
-    hash="sha256:abc",
+    hash="{_sha256("Hello")}",
 )
 '''
         result = validator.validate_string(source)
@@ -102,7 +107,7 @@ Block(
     def test_tampered_text_slice(self):
         raw_text = "Hello world"
         validator = Validator(raw_text_store={"test": raw_text})
-        source = '''\
+        source = f'''\
 from t2c.ontology import Block
 
 Block(
@@ -113,7 +118,7 @@ Block(
     start_offset=0,
     end_offset=11,
     text_slice="Tampered text",
-    hash="sha256:abc",
+    hash="{_sha256("Tampered text")}",
 )
 '''
         result = validator.validate_string(source)

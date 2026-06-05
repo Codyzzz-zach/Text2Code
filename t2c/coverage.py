@@ -12,13 +12,13 @@ class CoverageGenerator:
         self._store = store
 
     def generate_coverage(self, doc_id: str) -> CoverageReport:
-        segments = self._store.get_segments_by_doc(doc_id)
+        segments = list(self._store.query("Segment", doc_id=doc_id))
         total = len(segments)
         status_counts = {"covered": 0, "partial": 0, "raw_only": 0, "ignored": 0, "uncovered": 0}
         requires_raw_fallback: list[str] = []
 
-        for seg_data in segments:
-            seg_id = seg_data["id"]
+        for seg in segments:
+            seg_id = seg.id
             status = self._segment_status(seg_id)
             status_counts[status] += 1
             if self._requires_raw_fallback(seg_id, status):
@@ -34,11 +34,10 @@ class CoverageGenerator:
         )
 
     def _segment_status(self, segment_id: str) -> str:
-        has_semantic = bool(self._store.get_semantic_objects_for_segment(segment_id))
-        residuals = self._store.get_residuals_for_segment(segment_id)
+        has_semantic = bool(self._get_semantic_objects_for_segment(segment_id))
+        residuals = list(self._store.query("Residual", segment_id=segment_id))
         has_residual = bool(residuals)
-        is_ignored = bool(self._store.get("IgnoreSegment",
-                                          self._ignored_id(segment_id)))
+        is_ignored = bool(list(self._store.query("IgnoreSegment", segment_id=segment_id)))
 
         if is_ignored:
             return "ignored"
@@ -55,25 +54,29 @@ class CoverageGenerator:
             return True
 
         # Check for high-importance residuals
-        residuals = self._store.get_residuals_for_segment(segment_id)
+        residuals = list(self._store.query("Residual", segment_id=segment_id))
         for r in residuals:
-            if r.get("importance") == "high":
+            if r.importance == "high":
                 return True
 
         # Check for non-asserted claims or non-positive polarity
-        semantic = self._store.get_semantic_objects_for_segment(segment_id)
+        semantic = self._get_semantic_objects_for_segment(segment_id)
         for obj in semantic:
-            if obj.get("modality") and obj["modality"] != "asserted":
+            modality = getattr(obj, "modality", None)
+            polarity = getattr(obj, "polarity", None)
+            if modality and modality != "asserted":
                 return True
-            if obj.get("polarity") and obj["polarity"] != "positive":
+            if polarity and polarity != "positive":
                 return True
 
         return False
 
-    def _ignored_id(self, segment_id: str) -> str:
-        # Convention: ignore segment ID = segment_id + "_ign"
-        # Try to find by querying segment_id directly
-        rows = self._store.query("IgnoreSegment", segment_id=segment_id)
-        if rows:
-            return rows[0].get("id", "")
-        return ""
+    def _get_semantic_objects_for_segment(self, segment_id: str) -> list:
+        """Get all semantic objects (Entity/Event/Claim/Relation) referencing this segment."""
+        results = []
+        for type_name in ("Entity", "Event", "Claim", "Relation"):
+            for obj in self._store.query(type_name):
+                seg_ids = getattr(obj, "source_segment_ids", [])
+                if segment_id in seg_ids:
+                    results.append(obj)
+        return results

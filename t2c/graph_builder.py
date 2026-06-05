@@ -1,119 +1,98 @@
-"""Graph Builder — construct networkx DiGraph from validated objects."""
+"""Graph Builder — construct derived navigation graph from validated objects."""
 from __future__ import annotations
 
-import networkx as nx
-
 from t2c.object_store import ObjectStore
+from t2c.ontology import Claim, Entity, Event, Relation
 
 
 class GraphBuilder:
+    """Build a navigation graph from validated ObjectStore contents.
+
+    Graph is a derived index — never an evidence source.
+    """
+
     def __init__(self, store: ObjectStore) -> None:
         self._store = store
 
-    def build_graph(self, doc_id: str) -> nx.DiGraph:
-        G = nx.DiGraph()
+    def build_graph(self) -> dict:
+        """Build adjacency graph from stored objects."""
+        nodes: dict[str, dict] = {}
+        edges: list[dict] = []
 
-        # -- Nodes: Document, Block, Segment, Entity, Event, Claim, Residual --
+        # Add entity nodes
+        for entity in self._store.query("Entity"):
+            nodes[entity.id] = {
+                "type": "Entity",
+                "label": entity.name,
+                "kind": entity.kind,
+            }
 
-        doc = self._store.get("Document", doc_id)
-        if doc:
-            G.add_node(doc_id, type="Document", data=doc)
+        # Add event nodes and participation edges
+        for event in self._store.query("Event"):
+            nodes[event.id] = {
+                "type": "Event",
+                "label": event.name,
+                "kind": event.kind,
+            }
+            for participant_id in event.participants:
+                edges.append({
+                    "source": participant_id,
+                    "target": event.id,
+                    "type": "participates_in",
+                    "edge_class": "navigation",
+                })
 
-        blocks = self._store.query("Block", doc_id=doc_id)
-        for blk in blocks:
-            G.add_node(blk["id"], type="Block", data=blk)
-            G.add_edge(doc_id, blk["id"], type="contains")
+        # Add claim nodes
+        for claim in self._store.query("Claim"):
+            nodes[claim.id] = {
+                "type": "Claim",
+                "label": f"{claim.subject} {claim.predicate} {claim.object}",
+                "modality": claim.modality,
+                "polarity": claim.polarity,
+            }
 
-        segments = self._store.get_segments_by_doc(doc_id)
-        for seg in segments:
-            status = self._segment_status(seg["id"])
-            G.add_node(seg["id"], type="Segment", data=seg, status=status)
+        # Add relation edges — only safe ones are "fact" class
+        for rel in self._store.query("Relation"):
+            claim = self._store.load("Claim", rel.claim_id) if rel.claim_id else None
+            edge_class = self._classify_relation(rel, claim)
 
-        # Block → Segment edges
-        for seg in segments:
-            blk_id = f"{doc_id}_blk_{seg['block_index']:04d}"
-            if G.has_node(blk_id):
-                G.add_edge(blk_id, seg["id"], type="contains")
+            edges.append({
+                "source": rel.subject,
+                "target": rel.object,
+                "type": rel.predicate,
+                "claim_id": rel.claim_id,
+                "edge_class": edge_class,
+                "modality": claim.modality if claim else None,
+                "polarity": claim.polarity if claim else None,
+            })
 
-        entities = self._store.query("Entity")
-        for ent in entities:
-            G.add_node(ent["id"], type="Entity", data=ent)
+        return {"nodes": nodes, "edges": edges}
 
-        events = self._store.query("Event")
-        for evt in events:
-            G.add_node(evt["id"], type="Event", data=evt)
+    def _classify_relation(self, rel: Relation, claim: Claim | None) -> str:
+        """Classify a relation edge as 'fact' or 'claim_index'.
 
-        claims = self._store.query("Claim")
-        for clm in claims:
-            G.add_node(clm["id"], type="Claim", data=clm)
+        Only asserted, positive claims with matching subject/object
+        produce fact-like edges. Everything else is a claim_index.
+        """
+        if claim is None:
+            return "claim_index"
 
-        residuals = self._store.query("Residual")
-        for res in residuals:
-            G.add_node(res["id"], type="Residual", data=res)
+        if claim.modality != "asserted":
+            return "claim_index"
 
-        # -- Edges --
+        if claim.polarity != "positive":
+            return "claim_index"
 
-        # Relation: subject → object
-        relations = self._store.query("Relation")
-        for rel in relations:
-            G.add_edge(
-                rel["subject"], rel["object"],
-                type="relation", predicate=rel["predicate"],
-                claim_id=rel["claim_id"], data=rel,
-            )
+        # Verify subject/object alignment
+        if claim.subject != rel.subject or claim.object != rel.object:
+            return "claim_index"
 
-        # Entity → Event (participates_in)
-        for evt in events:
-            for participant_id in evt.get("participants", []):
-                G.add_edge(
-                    participant_id, evt["id"],
-                    type="participates_in", data={},
-                )
+        # Must have evidence
+        has_evidence = (
+            bool(claim.evidence_refs)
+            or bool(claim.source_segment_ids)
+        )
+        if not has_evidence:
+            return "claim_index"
 
-        # Entity → Segment (evidence)
-        for ent in entities:
-            for seg_id in ent.get("source_segment_ids", []):
-                G.add_edge(
-                    ent["id"], seg_id,
-                    type="evidence", data={},
-                )
-
-        # Event → Segment (evidence)
-        for evt in events:
-            for seg_id in evt.get("source_segment_ids", []):
-                G.add_edge(
-                    evt["id"], seg_id,
-                    type="evidence", data={},
-                )
-
-        # Claim → Segment (evidence)
-        for clm in claims:
-            for seg_id in clm.get("source_segment_ids", []):
-                G.add_edge(
-                    clm["id"], seg_id,
-                    type="evidence", data={},
-                )
-
-        # Segment → Residual
-        for res in residuals:
-            seg_id = res.get("segment_id")
-            if seg_id and G.has_node(seg_id):
-                G.add_edge(seg_id, res["id"], type="has_residual", data={})
-
-        return G
-
-    def _segment_status(self, segment_id: str) -> str:
-        has_semantic = bool(self._store.get_semantic_objects_for_segment(segment_id))
-        residuals = self._store.get_residuals_for_segment(segment_id)
-        has_residual = bool(residuals)
-        is_ignored = bool(self._store.query("IgnoreSegment", segment_id=segment_id))
-
-        if is_ignored:
-            return "ignored"
-        if has_semantic and not has_residual:
-            return "covered"
-        if has_semantic and has_residual:
-            return "partial"
-        if not has_semantic and has_residual:
-            return "raw_only"
-        return "uncovered"
+        return "fact"

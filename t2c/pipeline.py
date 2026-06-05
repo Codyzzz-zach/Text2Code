@@ -1,234 +1,306 @@
-"""T2C Pipeline — end-to-end processing: raw text → text map → semantic extraction → knowledge code."""
+"""Pipeline — orchestrate the full Text → Code flow with validation and repair."""
 from __future__ import annotations
 
+import hashlib
 import logging
-import re
-from pathlib import Path
+from dataclasses import dataclass, field
+from typing import Any
 
 from t2c.codegen import CodeGenerator
 from t2c.corpus import CorpusManager
 from t2c.extractor import LLMExtractor
+from t2c.object_store import ObjectStore
 from t2c.ontology import Block, Document, Segment
+from t2c.schema import SchemaValidator
 from t2c.segmenter import Segmenter
-from t2c.validator import ValidationResult, Validator
+from t2c.validator import Validator
 
 logger = logging.getLogger(__name__)
 
+MAX_REPAIR_ATTEMPTS = 2
 
-class T2CPipeline:
-    """End-to-end pipeline: raw text → text map → semantic extraction → knowledge code."""
+
+@dataclass
+class PipelineResult:
+    objects: list[dict] = field(default_factory=list)
+    code: str = ""
+    valid: bool = True
+    errors: list[str] = field(default_factory=list)
+    warnings: list[str] = field(default_factory=list)
+    repair_attempts: int = 0
+    raw_fallback_segment_ids: list[str] = field(default_factory=list)
+    saved_count: int = 0
+    rejected_count: int = 0
+    # v3.4.1: extraction telemetry
+    batches_truncated: int = 0
+    total_input_tokens: int = 0
+    total_output_tokens: int = 0
+    api_elapsed_sec: float = 0.0
+
+
+class Pipeline:
+    """Full pipeline: Raw Text -> Segments -> Candidates -> Validation -> Repair -> Code -> Store."""
 
     def __init__(
         self,
-        output_dir: Path,
-        model: str = "claude-sonnet-4-20250514",
-        api_key: str | None = None,
-        base_url: str | None = None,
+        store: ObjectStore | None = None,
+        extractor: LLMExtractor | None = None,
+        *,
+        max_repair_attempts: int = MAX_REPAIR_ATTEMPTS,
     ) -> None:
-        self._output_dir = output_dir
-        self._corpus = CorpusManager()
-        self._segmenter = Segmenter()
-        self._codegen = CodeGenerator()
-        self._extractor = LLMExtractor(model=model, api_key=api_key, base_url=base_url)
-        self._validator = Validator()
+        self._store = store or ObjectStore()
+        self._extractor = extractor
+        self._max_repair = max_repair_attempts
 
-    def run_document(self, raw_text: str, doc_id: str) -> tuple[Document, list[Block]]:
-        """Ingest raw text and generate Document + Blocks."""
-        doc, _ = self._corpus.ingest_text(raw_text, doc_id)
-        blocks = self._corpus.create_blocks(doc, raw_text)
-        return doc, blocks
+    @property
+    def store(self) -> ObjectStore:
+        return self._store
 
-    def run_segments(
-        self, doc: Document, blocks: list[Block], raw_text: str
-    ) -> list[Segment]:
-        """Generate segments for all blocks."""
-        all_segments: list[Segment] = []
-        for block in blocks:
-            block_text = raw_text[block.start_offset:block.end_offset]
-            segments = self._segmenter.segment_block(doc.id, block, block_text)
-            all_segments.extend(segments)
-        return all_segments
-
-    def find_chapter_boundaries(self, raw_text: str) -> list[tuple[int, str, int, int]]:
-        """Find chapter boundaries in the raw text.
-
-        Returns list of (chapter_num, title, start_offset, end_offset).
-        Only matches chapter headings that appear at the start of a line.
-        """
-        chapters = list(re.finditer(r"(?<=\n)第[一二三四五六七八九十百千零\d]+回", raw_text))
-        boundaries: list[tuple[int, str, int, int]] = []
-        for i, m in enumerate(chapters):
-            title = raw_text[m.start():m.start() + 40].split("\n")[0].strip()
-            start = m.start()
-            end = chapters[i + 1].start() if i + 1 < len(chapters) else len(raw_text)
-            # Extract chapter number
-            num_match = re.match(r"第([一二三四五六七八九十百千零\d]+)回", title)
-            if not num_match:
-                continue
-            num_str = num_match.group(1)
-            num = self._chinese_num_to_int(num_str)
-            boundaries.append((num, title, start, end))
-        return boundaries
-
-    def _chinese_num_to_int(self, num_str: str) -> int:
-        """Convert Chinese number string to integer."""
-        mapping = {
-            "一": 1, "二": 2, "三": 3, "四": 4, "五": 5,
-            "六": 6, "七": 7, "八": 8, "九": 9, "十": 10,
-            "百": 100, "零": 0,
-        }
-        # Try pure digit
-        if num_str.isdigit():
-            return int(num_str)
-        # Simple Chinese numeral conversion
-        if num_str in mapping:
-            return mapping[num_str]
-        result = 0
-        for ch in num_str:
-            if ch.isdigit():
-                result = result * 10 + int(ch)
-            elif ch in mapping:
-                val = mapping[ch]
-                if val >= 10:
-                    result = result * val if result else val
-                else:
-                    result += val
-        return result
-
-    def run_chapter(
-        self,
-        doc_id: str,
-        chapter_num: int,
-        chapter_title: str,
-        chapter_segments: list[Segment],
-        existing_entities: dict[str, str] | None = None,
-    ) -> tuple[list[dict], ValidationResult]:
-        """Extract semantic objects for one chapter and validate.
-
-        Returns (semantic_objects, validation_result).
-        """
-        objects = self._extractor.extract_chapter(
-            doc_id, chapter_num, chapter_title, chapter_segments, existing_entities
-        )
-        # Validate extracted objects
-        self._validator.set_raw_text(doc_id, "")  # No raw text for schema-only validation
-        result = self._validator.validate_objects(objects)
-        return objects, result
-
-    def run_chapters(
+    def process_text(
         self,
         raw_text: str,
         doc_id: str,
-        chapter_nums: list[int] | None = None,
-        precomputed_segments: list[Segment] | None = None,
-    ) -> list[dict]:
-        """Process multiple chapters with cross-chapter entity resolution.
+        source_path: str = "",
+        chapter_num: int = 1,
+        chapter_title: str = "",
+    ) -> PipelineResult:
+        """Process raw text through the full pipeline.
 
-        Args:
-            raw_text: Full novel text
-            doc_id: Document ID
-            chapter_nums: Which chapters to process (1-based). None = all.
-            precomputed_segments: If provided, skip re-computing document+segments.
-
-        Returns list of dicts with chapter results.
+        Steps:
+        1. Ingest text into corpus (Document + raw_text_hash)
+        2. Create blocks from text
+        3. Segment each block
+        4. Extract candidates via LLM (if extractor available)
+        5. Validate candidates
+        6. Repair if invalid (up to max_repair_attempts)
+        7. Validate schema + construct models
+        8. Generate code from valid models
+        9. Save valid objects to store (with validation gate)
+        10. Generate raw fallback Residual for unrepairable segments
         """
-        if precomputed_segments is not None:
-            all_segments = precomputed_segments
-        else:
-            doc, blocks = self.run_document(raw_text, doc_id)
-            all_segments = self.run_segments(doc, blocks, raw_text)
-        boundaries = self.find_chapter_boundaries(raw_text)
+        result = PipelineResult()
 
-        # Build segment-by-offset lookup
-        seg_by_offset: dict[tuple[int, int], Segment] = {}
-        for s in all_segments:
-            seg_by_offset[(s.start_offset, s.end_offset)] = s
+        # Step 1: Ingest text into corpus
+        corpus = CorpusManager()
+        doc, stored_text = corpus.ingest_text(raw_text, doc_id, source_path)
+        logger.info("Ingested document %s (%d chars)", doc_id, len(raw_text))
 
-        entity_map: dict[str, str] = {}
-        results: list[dict] = []
+        # Step 2: Create blocks
+        blocks = corpus.create_blocks(doc, raw_text)
+        logger.info("Created %d blocks for %s", len(blocks), doc_id)
 
-        for ch_num, ch_title, ch_start, ch_end in boundaries:
-            if chapter_nums and ch_num not in chapter_nums:
+        # Step 3: Segment each block
+        segmenter = Segmenter()
+        all_segments: list[Segment] = []
+        for block in blocks:
+            block_text = corpus.get_block_text(doc, block, raw_text)
+            segs = segmenter.segment_block(doc_id, block, block_text)
+            all_segments.extend(segs)
+        logger.info("Segmented %s into %d segments", doc_id, len(all_segments))
+
+        # Save document and segments to store
+        self._store.save(doc)
+        for seg in all_segments:
+            self._store.save(seg)
+
+        # Step 4: Extract (if extractor available)
+        if self._extractor is None:
+            logger.warning("No extractor configured - skipping candidate extraction")
+            result.warnings.append("No extractor configured")
+            return result
+
+        objects = self._extractor.extract_chapter(
+            doc_id=doc_id,
+            chapter_num=chapter_num,
+            chapter_title=chapter_title,
+            segments=all_segments,
+        )
+        result.objects = objects
+        # v3.4.1: capture extraction telemetry
+        result.batches_truncated = 1 if getattr(self._extractor, "_last_batch_truncated", False) else 0
+        result.total_input_tokens = getattr(self._extractor, "_total_input_tokens", 0)
+        result.total_output_tokens = getattr(self._extractor, "_total_output_tokens", 0)
+        result.api_elapsed_sec = getattr(self._extractor, "_api_elapsed_sec", 0.0)
+        logger.info("Extracted %d candidate objects", len(objects))
+
+        # Step 5: Validate (with raw_text for evidence checks)
+        self._store.set_raw_text(doc_id, raw_text)
+        validator = Validator(
+            raw_text_store={doc_id: raw_text},
+            external_index=self._store._build_id_index(),
+        )
+        val_result = validator.validate_objects(objects)
+        result.errors = val_result.errors
+        result.warnings = val_result.warnings
+
+        # Step 6: Repair loop
+        repair_attempts = 0
+        while not val_result.valid and repair_attempts < self._max_repair:
+            repair_attempts += 1
+            logger.info("Repair attempt %d/%d", repair_attempts, self._max_repair)
+
+            objects = self._repair(objects, val_result.errors, all_segments)
+            val_result = validator.validate_objects(objects)
+            result.errors = val_result.errors
+            result.warnings = val_result.warnings
+
+        result.repair_attempts = repair_attempts
+        result.valid = val_result.valid
+
+        # Step 7: Validate schema + construct models
+        models: list = []
+        if objects:
+            sv = SchemaValidator()
+            models, _ = sv.validate_and_construct(objects)
+
+        # Step 8: Generate code from validated models
+        if models:
+            codegen = CodeGenerator()
+            result.code = codegen.generate_knowledge_code(models)
+
+        # Step 9: Save valid objects to store (with validation gate)
+        if models:
+            saved_count, val_errors = self._store.save_validated_batch(models)
+            result.saved_count = saved_count
+            result.rejected_count = len(models) - saved_count
+
+        # Step 10: Raw fallback for uncovered segments
+        if not val_result.valid:
+            raw_fallback_ids = self._generate_raw_fallbacks(
+                objects, all_segments, doc_id, val_result.errors
+            )
+            result.raw_fallback_segment_ids = raw_fallback_ids
+
+        return result
+
+    def _repair(
+        self,
+        objects: list[dict],
+        errors: list[str],
+        segments: list[Segment],
+    ) -> list[dict]:
+        """Attempt to repair invalid objects by removing problematic references.
+
+        Current strategy: remove objects with errors rather than re-calling LLM.
+        This avoids the cost of additional API calls for simple reference errors.
+        Objects with only warnings are kept.
+        Also cleans up dangling references (IDs referenced in fields but not
+        present in any object).
+        """
+        # Build set of object IDs that have errors
+        error_ids: set[str] = set()
+        for err in errors:
+            for obj in objects:
+                obj_id = obj.get("data", {}).get("id", "")
+                if obj_id and obj_id in err:
+                    error_ids.add(obj_id)
+
+        # Remove objects with errors
+        repaired = [obj for obj in objects if obj.get("data", {}).get("id", "") not in error_ids]
+
+        # Build set of all known valid IDs after removal
+        known_ids: set[str] = set()
+        for obj in repaired:
+            obj_id = obj.get("data", {}).get("id", "")
+            if obj_id:
+                known_ids.add(obj_id)
+        for seg in segments:
+            known_ids.add(seg.id)
+
+        # Combined set of IDs to purge: removed objects + dangling references
+        purge_ids = error_ids.copy()
+        for err in errors:
+            # Extract ID-like tokens from error messages for dangling references
+            # e.g. "dangling reference to 'e2'" → e2
+            for obj in repaired:
+                for field_name in ("participants", "subject", "object", "claim_id",
+                                   "source", "derived_from", "source_segment_ids",
+                                   "segment_id", "evidence_refs"):
+                    val = obj.get("data", {}).get(field_name)
+                    if val is None:
+                        continue
+                    ids_to_check = val if isinstance(val, list) else [val]
+                    for ref_id in ids_to_check:
+                        if isinstance(ref_id, str) and ref_id not in known_ids:
+                            purge_ids.add(ref_id)
+
+        for obj in repaired:
+            data = obj.get("data", {})
+            # Clean up source_segment_ids
+            if "source_segment_ids" in data:
+                data["source_segment_ids"] = [
+                    sid for sid in data["source_segment_ids"] if sid not in purge_ids
+                ]
+            # Clean up participants
+            if "participants" in data:
+                data["participants"] = [
+                    p for p in data["participants"] if p not in purge_ids
+                ]
+            # Clean up derived_from
+            if "derived_from" in data:
+                data["derived_from"] = [
+                    d for d in data["derived_from"] if d not in purge_ids
+                ]
+            # Clean up subject/object scalar references
+            if data.get("subject") in purge_ids:
+                data["subject"] = None
+            if data.get("object") in purge_ids:
+                data["object"] = None
+            # Remove Relation with dangling claim_id
+            if data.get("claim_id") in purge_ids:
+                data["claim_id"] = None
+            # Clean up segment_id scalar reference
+            if data.get("segment_id") in purge_ids:
+                data["segment_id"] = None
+
+        return repaired
+
+    def _generate_raw_fallbacks(
+        self,
+        objects: list[dict],
+        segments: list[Segment],
+        doc_id: str,
+        errors: list[str],
+    ) -> list[str]:
+        """Generate Residual objects for segments that couldn't be properly structured.
+
+        Returns list of segment IDs that got raw fallback treatment.
+        """
+        # Find segments that are referenced by objects with errors
+        error_obj_ids: set[str] = set()
+        for err in errors:
+            for obj in objects:
+                obj_id = obj.get("data", {}).get("id", "")
+                if obj_id and obj_id in err:
+                    error_obj_ids.add(obj_id)
+
+        # Find segment IDs that need raw fallback
+        fallback_seg_ids: set[str] = set()
+        for obj in objects:
+            if obj.get("data", {}).get("id", "") in error_obj_ids:
+                for seg_id in obj.get("data", {}).get("source_segment_ids", []):
+                    fallback_seg_ids.add(seg_id)
+
+        # Generate Residual objects for these segments
+        seg_map = {s.id: s for s in segments}
+        for seg_id in fallback_seg_ids:
+            seg = seg_map.get(seg_id)
+            if seg is None:
                 continue
+            residual = {
+                "type": "Residual",
+                "data": {
+                    "id": f"{doc_id}_res_raw_{seg_id}",
+                    "segment_id": seg_id,
+                    "category": "structural",
+                    "importance": "high",
+                    "reason": "Segment contains information that could not be safely structured due to validation errors",
+                },
+            }
+            # Save directly (raw fallback, not validated)
+            sv = SchemaValidator()
+            models, _ = sv.validate_and_construct([residual])
+            for m in models:
+                self._store.save(m)
 
-            # Collect segments for this chapter
-            ch_segments = [
-                s for s in all_segments
-                if s.start_offset >= ch_start and s.start_offset < ch_end
-            ]
-
-            if not ch_segments:
-                continue
-
-            logger.info(
-                "Processing Ch%d %s: %d segments, %d known entities",
-                ch_num, ch_title, len(ch_segments), len(entity_map),
-            )
-
-            objects, validation = self.run_chapter(
-                doc_id, ch_num, ch_title, ch_segments, entity_map
-            )
-
-            # Update entity map with this chapter's entities
-            pre_count = len(entity_map)
-            new_entities = LLMExtractor.build_entity_map(objects)
-            entity_map.update(new_entities)
-            added = len(entity_map) - pre_count
-
-            # Count by type
-            type_counts = {}
-            for o in objects:
-                t = o.get("type", "?")
-                type_counts[t] = type_counts.get(t, 0) + 1
-            logger.info(
-                "Ch%d extracted: %s, entities +%d (total %d)",
-                ch_num, type_counts, added, len(entity_map),
-            )
-            if validation.errors:
-                logger.warning("Ch%d validation errors: %d", ch_num, len(validation.errors))
-
-            results.append({
-                "chapter_num": ch_num,
-                "title": ch_title,
-                "segments": ch_segments,
-                "semantic_objects": objects,
-                "validation": validation,
-                "entity_map": dict(entity_map),
-            })
-
-        return results
-
-    def write_chapter_knowledge(
-        self, chapter_num: int, objects: list[dict]
-    ) -> Path:
-        """Write semantic objects to a .t2c.py knowledge file."""
-        from t2c.schema import SchemaValidator
-        sv = SchemaValidator()
-        models, _ = sv.validate_and_construct(objects)
-
-        if not models:
-            code = "# No valid semantic objects extracted\n"
-        else:
-            code = self._codegen.generate_knowledge_code(models)
-
-        filename = f"hongloumeng_ch{chapter_num:02d}.knowledge.t2c.py"
-        path = self._output_dir / filename
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(code, encoding="utf-8")
-        return path
-
-    def write_text_map(
-        self, doc: Document, blocks: list[Block], segments: list[Segment]
-    ) -> tuple[Path, Path]:
-        """Write Document+Blocks and Segments .t2c.py files."""
-        self._output_dir.mkdir(parents=True, exist_ok=True)
-
-        doc_code = self._codegen.generate_document_code(doc, blocks)
-        doc_path = self._output_dir / "hongloumeng.document.t2c.py"
-        doc_path.write_text(doc_code, encoding="utf-8")
-
-        seg_code = self._codegen.generate_segments_code(segments)
-        seg_path = self._output_dir / "hongloumeng.segments.t2c.py"
-        seg_path.write_text(seg_code, encoding="utf-8")
-
-        return doc_path, seg_path
+        return list(fallback_seg_ids)

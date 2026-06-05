@@ -1,14 +1,19 @@
 """Validator — full pipeline: AST → Schema → Reference → Evidence → Claim Safety → Coverage."""
 from __future__ import annotations
 
-from dataclasses import dataclass
+import hashlib
+import logging
+from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any, Sequence
 
 from pydantic import BaseModel
 
 from t2c.claim_safety import ClaimSafetyValidator
 from t2c.parser import T2CParseError, T2CParser
 from t2c.schema import SchemaValidator, SchemaViolation
+
+logger = logging.getLogger(__name__)
 
 
 class ValidationResult(BaseModel):
@@ -23,11 +28,14 @@ class Validator:
     def __init__(
         self,
         raw_text_store: dict[str, str] | None = None,
+        external_index: dict[str, set[str]] | None = None,
     ) -> None:
         self._parser = T2CParser()
         self._schema_validator = SchemaValidator()
         self._claim_safety_validator = ClaimSafetyValidator()
         self._raw_text_store: dict[str, str] = raw_text_store or {}
+        # external_index maps type names to sets of known IDs from external files
+        self._external_index: dict[str, set[str]] = external_index or {}
 
     def set_raw_text(self, doc_id: str, text: str) -> None:
         self._raw_text_store[doc_id] = text
@@ -53,12 +61,12 @@ class Validator:
         for v in schema_violations:
             errors.append(f"Schema violation in {v.object_type} ({v.object_id}): {v.field} — {v.message}")
 
-        # Step 3: Reference validation
+        # Step 3: Reference validation (full ID reference checks)
         ref_errors, ref_warnings = self._validate_references(objects)
         errors.extend(ref_errors)
         warnings.extend(ref_warnings)
 
-        # Step 4: Evidence validation
+        # Step 4: Evidence validation (span/hash for EvidenceRef)
         ev_errors, ev_warnings = self._validate_evidence(objects)
         errors.extend(ev_errors)
         warnings.extend(ev_warnings)
@@ -104,46 +112,285 @@ class Validator:
             warnings=warnings,
         )
 
-    # -- Reference validation --------------------------------------------
+    # -- Index builders --------------------------------------------------
 
-    def _validate_references(self, objects: list[dict]) -> tuple[list[str], list[str]]:
-        """Check that all cross-references resolve to existing objects."""
-        errors: list[str] = []
-        warnings: list[str] = []
-
-        existing_ids: dict[str, set[str]] = {}
+    def _build_type_id_sets(self, objects: list[dict]) -> dict[str, set[str]]:
+        """Build {type_name: set(object_ids)} from parsed object dicts."""
+        id_sets: dict[str, set[str]] = {}
         for obj in objects:
             type_name = obj.get("type", "")
             data = obj.get("data", {})
             obj_id = data.get("id")
             if obj_id:
-                existing_ids.setdefault(type_name, set()).add(str(obj_id))
+                id_sets.setdefault(type_name, set()).add(str(obj_id))
+        return id_sets
 
-        doc_ids = existing_ids.get("Document", set())
+    def _build_all_id_set(self, objects: list[dict]) -> set[str]:
+        """Build set of all object IDs across all types."""
+        all_ids: set[str] = set()
+        for obj in objects:
+            data = obj.get("data", {})
+            obj_id = data.get("id")
+            if obj_id:
+                all_ids.add(str(obj_id))
+        return all_ids
+
+    # -- Reference validation -------------------------------------------
+
+    def _validate_references(self, objects: list[dict]) -> tuple[list[str], list[str]]:
+        """Check that all cross-references resolve to existing objects.
+
+        For each object type, validates:
+        - Entity: source_segment_ids → Segment, evidence_refs[].segment_id → Segment
+        - Event: participants → Entity, source_segment_ids → Segment, evidence_refs[].segment_id → Segment
+        - Claim: subject → Entity, object → Entity (if entity ID style), source → Entity/Claim,
+                  derived_from → Claim, source_segment_ids → Segment, evidence_refs[].segment_id → Segment
+        - Relation: subject → Entity, object → Entity, claim_id → Claim, evidence_refs[].segment_id → Segment
+        - Residual: segment_id → Segment, evidence_refs[].segment_id → Segment
+        - IgnoreSegment: segment_id → Segment, evidence_refs[].segment_id → Segment
+        - Block: doc_id → Document
+        - Segment: doc_id → Document
+        """
+        errors: list[str] = []
+        warnings: list[str] = []
+
+        id_sets = self._build_type_id_sets(objects)
+        all_ids = self._build_all_id_set(objects)
+
+        # Merge external index into id_sets for cross-file reference resolution
+        merged_id_sets: dict[str, set[str]] = {}
+        for type_name, ids in id_sets.items():
+            merged_id_sets[type_name] = ids | self._external_index.get(type_name, set())
+        for type_name, ids in self._external_index.items():
+            if type_name not in merged_id_sets:
+                merged_id_sets[type_name] = ids
+
         for obj in objects:
             type_name = obj.get("type", "")
             data = obj.get("data", {})
             obj_id = data.get("id", "?")
 
-            if type_name in ("Block", "Segment"):
-                doc_id = data.get("doc_id")
-                if doc_id and doc_id not in doc_ids:
-                    warnings.append(
-                        f"Reference warning in {type_name} ({obj_id}): "
-                        f"doc_id '{doc_id}' not found in current file"
+            if type_name == "Block":
+                self._check_ref(
+                    obj_id, "Block", "doc_id", data.get("doc_id"),
+                    "Document", id_sets, merged_id_sets, errors, warnings,
+                )
+
+            elif type_name == "Segment":
+                self._check_ref(
+                    obj_id, "Segment", "doc_id", data.get("doc_id"),
+                    "Document", id_sets, merged_id_sets, errors, warnings,
+                )
+
+            elif type_name == "Entity":
+                self._check_ref_list(
+                    obj_id, "Entity", "source_segment_ids",
+                    data.get("source_segment_ids", []),
+                    "Segment", id_sets, merged_id_sets, errors, warnings,
+                )
+                # evidence_refs[].segment_id
+                for eref in data.get("evidence_refs", []):
+                    self._check_ref(
+                        obj_id, "Entity", "evidence_refs[].segment_id",
+                        eref.get("segment_id"),
+                        "Segment", id_sets, merged_id_sets, errors, warnings,
+                    )
+
+            elif type_name == "Event":
+                self._check_ref_list(
+                    obj_id, "Event", "participants",
+                    data.get("participants", []),
+                    "Entity", id_sets, merged_id_sets, errors, warnings,
+                )
+                self._check_ref_list(
+                    obj_id, "Event", "source_segment_ids",
+                    data.get("source_segment_ids", []),
+                    "Segment", id_sets, merged_id_sets, errors, warnings,
+                )
+                for eref in data.get("evidence_refs", []):
+                    self._check_ref(
+                        obj_id, "Event", "evidence_refs[].segment_id",
+                        eref.get("segment_id"),
+                        "Segment", id_sets, merged_id_sets, errors, warnings,
+                    )
+
+            elif type_name == "Claim":
+                self._check_ref(
+                    obj_id, "Claim", "subject", data.get("subject"),
+                    "Entity", id_sets, merged_id_sets, errors, warnings,
+                )
+                # object: only validate if it looks like an entity ID
+                obj_val = data.get("object")
+                if obj_val and self._is_entity_id_style(obj_val):
+                    self._check_ref(
+                        obj_id, "Claim", "object", obj_val,
+                        "Entity", id_sets, merged_id_sets, errors, warnings,
+                    )
+                # source: Entity.id or Claim.id
+                source_val = data.get("source")
+                if source_val:
+                    # Try both Entity and Claim
+                    found_in_entity = source_val in merged_id_sets.get("Entity", set())
+                    found_in_claim = source_val in merged_id_sets.get("Claim", set())
+                    if not found_in_entity and not found_in_claim:
+                        if "Entity" in id_sets or "Claim" in id_sets:
+                            errors.append(
+                                f"Reference error in Claim ({obj_id}): "
+                                f"source '{source_val}' not found in Entity or Claim ids"
+                            )
+                        else:
+                            warnings.append(
+                                f"Reference warning in Claim ({obj_id}): "
+                                f"source '{source_val}' not found (no Entity/Claim in current file)"
+                            )
+                self._check_ref_list(
+                    obj_id, "Claim", "derived_from",
+                    data.get("derived_from", []),
+                    "Claim", id_sets, merged_id_sets, errors, warnings,
+                )
+                self._check_ref_list(
+                    obj_id, "Claim", "source_segment_ids",
+                    data.get("source_segment_ids", []),
+                    "Segment", id_sets, merged_id_sets, errors, warnings,
+                )
+                for eref in data.get("evidence_refs", []):
+                    self._check_ref(
+                        obj_id, "Claim", "evidence_refs[].segment_id",
+                        eref.get("segment_id"),
+                        "Segment", id_sets, merged_id_sets, errors, warnings,
+                    )
+
+            elif type_name == "Relation":
+                self._check_ref(
+                    obj_id, "Relation", "subject", data.get("subject"),
+                    "Entity", id_sets, merged_id_sets, errors, warnings,
+                )
+                self._check_ref(
+                    obj_id, "Relation", "object", data.get("object"),
+                    "Entity", id_sets, merged_id_sets, errors, warnings,
+                )
+                self._check_ref(
+                    obj_id, "Relation", "claim_id", data.get("claim_id"),
+                    "Claim", id_sets, merged_id_sets, errors, warnings,
+                )
+                for eref in data.get("evidence_refs", []):
+                    self._check_ref(
+                        obj_id, "Relation", "evidence_refs[].segment_id",
+                        eref.get("segment_id"),
+                        "Segment", id_sets, merged_id_sets, errors, warnings,
+                    )
+
+            elif type_name == "Residual":
+                self._check_ref(
+                    obj_id, "Residual", "segment_id", data.get("segment_id"),
+                    "Segment", id_sets, merged_id_sets, errors, warnings,
+                )
+                for eref in data.get("evidence_refs", []):
+                    self._check_ref(
+                        obj_id, "Residual", "evidence_refs[].segment_id",
+                        eref.get("segment_id"),
+                        "Segment", id_sets, merged_id_sets, errors, warnings,
+                    )
+
+            elif type_name == "IgnoreSegment":
+                self._check_ref(
+                    obj_id, "IgnoreSegment", "segment_id", data.get("segment_id"),
+                    "Segment", id_sets, merged_id_sets, errors, warnings,
+                )
+                for eref in data.get("evidence_refs", []):
+                    self._check_ref(
+                        obj_id, "IgnoreSegment", "evidence_refs[].segment_id",
+                        eref.get("segment_id"),
+                        "Segment", id_sets, merged_id_sets, errors, warnings,
                     )
 
         return errors, warnings
 
+    @staticmethod
+    def _is_entity_id_style(value: str) -> bool:
+        """Check if a value looks like an Entity ID (contains '_ent_' prefix)."""
+        return "_ent_" in value
+
+    def _check_ref(
+        self,
+        obj_id: str,
+        obj_type: str,
+        field_name: str,
+        ref_value: str | None,
+        target_type: str,
+        id_sets: dict[str, set[str]],
+        merged_id_sets: dict[str, set[str]],
+        errors: list[str],
+        warnings: list[str],
+    ) -> None:
+        """Check a single reference value resolves to an existing object."""
+        if ref_value is None:
+            return
+
+        # Check merged index (local + external)
+        if ref_value in merged_id_sets.get(target_type, set()):
+            return
+
+        # Not found in merged index
+        if target_type in id_sets and id_sets[target_type]:
+            # Target type objects exist locally — dangling ref is an error
+            errors.append(
+                f"Reference error in {obj_type} ({obj_id}): "
+                f"{field_name} '{ref_value}' not found in {target_type} ids"
+            )
+        else:
+            # No local objects of target type — may be cross-file reference
+            warnings.append(
+                f"Reference warning in {obj_type} ({obj_id}): "
+                f"{field_name} '{ref_value}' not found in current {target_type} ids (may be external)"
+            )
+
+    def _check_ref_list(
+        self,
+        obj_id: str,
+        obj_type: str,
+        field_name: str,
+        ref_values: list[str],
+        target_type: str,
+        id_sets: dict[str, set[str]],
+        merged_id_sets: dict[str, set[str]],
+        errors: list[str],
+        warnings: list[str],
+    ) -> None:
+        """Check each value in a reference list."""
+        for i, ref_val in enumerate(ref_values):
+            self._check_ref(
+                obj_id, obj_type, f"{field_name}[{i}]",
+                ref_val, target_type, id_sets, merged_id_sets, errors, warnings,
+            )
+
     # -- Evidence validation ---------------------------------------------
 
     def _validate_evidence(self, objects: list[dict]) -> tuple[list[str], list[str]]:
-        """Validate evidence references against raw text when available."""
+        """Validate evidence references against raw text when available.
+
+        Validates:
+        - Block/Segment: text_slice hash, raw text offset replay
+        - EvidenceRef: segment_id existence, start >= 0, end > start, end <= len(text_slice),
+          sha256(segment.text_slice[start:end]) == quote_hash
+        """
         errors: list[str] = []
         warnings: list[str] = []
 
-        import hashlib
+        # Build segment text map for EvidenceRef validation
+        seg_text_map: dict[str, str] = {}
+        for obj in objects:
+            if obj.get("type") == "Segment":
+                data = obj.get("data", {})
+                seg_id = data.get("id")
+                text_slice = data.get("text_slice")
+                if seg_id and text_slice:
+                    seg_text_map[seg_id] = text_slice
 
+        # Build id sets for EvidenceRef segment_id reference check
+        id_sets = self._build_type_id_sets(objects)
+
+        # Block/Segment hash and raw text replay validation
         for obj in objects:
             type_name = obj.get("type", "")
             data = obj.get("data", {})
@@ -178,6 +425,64 @@ class Validator:
                         f"Evidence warning in {type_name} ({obj_id}): "
                         f"raw text for doc_id '{doc_id}' not available for validation"
                     )
+
+            # EvidenceRef validation for semantic objects
+            if type_name in ("Entity", "Event", "Claim", "Relation", "Residual", "IgnoreSegment"):
+                erefs = data.get("evidence_refs", [])
+                for i, eref in enumerate(erefs):
+                    seg_id = eref.get("segment_id")
+                    start = eref.get("start")
+                    end = eref.get("end")
+                    quote_hash = eref.get("quote_hash")
+
+                    # segment_id must exist
+                    if seg_id and "Segment" in id_sets and seg_id not in id_sets["Segment"]:
+                        errors.append(
+                            f"Evidence error in {type_name} ({obj_id}): "
+                            f"evidence_refs[{i}].segment_id '{seg_id}' not found in Segment ids"
+                        )
+                        continue  # Can't validate span/hash if segment doesn't exist
+
+                    # Span and hash validation (only if segment text is available)
+                    if seg_id and seg_id in seg_text_map:
+                        seg_text = seg_text_map[seg_id]
+
+                        # start >= 0
+                        if start is not None and start < 0:
+                            errors.append(
+                                f"Evidence error in {type_name} ({obj_id}): "
+                                f"evidence_refs[{i}].start={start} must be >= 0"
+                            )
+
+                        # end > start
+                        if start is not None and end is not None and end <= start:
+                            errors.append(
+                                f"Evidence error in {type_name} ({obj_id}): "
+                                f"evidence_refs[{i}].end={end} must be > start={start}"
+                            )
+
+                        # end <= len(text_slice)
+                        if end is not None and end > len(seg_text):
+                            errors.append(
+                                f"Evidence error in {type_name} ({obj_id}): "
+                                f"evidence_refs[{i}].end={end} exceeds segment text length {len(seg_text)}"
+                            )
+
+                        # Hash validation: sha256(segment.text_slice[start:end]) == quote_hash
+                        if (
+                            start is not None
+                            and end is not None
+                            and start >= 0
+                            and end <= len(seg_text)
+                            and end > start
+                            and quote_hash
+                        ):
+                            actual_hash = f"sha256:{hashlib.sha256(seg_text[start:end].encode('utf-8')).hexdigest()}"
+                            if actual_hash != quote_hash:
+                                errors.append(
+                                    f"Evidence error in {type_name} ({obj_id}): "
+                                    f"evidence_refs[{i}] quote_hash mismatch for segment {seg_id}[{start}:{end}]"
+                                )
 
         return errors, warnings
 

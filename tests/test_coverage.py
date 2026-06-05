@@ -8,6 +8,11 @@ from t2c.ontology import (
 )
 
 
+def _sha256(text: str) -> str:
+    import hashlib
+    return "sha256:" + hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
 @pytest.fixture
 def store():
     s = ObjectStore()
@@ -18,7 +23,7 @@ def store():
 def _setup_doc(store, doc_id="doc1"):
     doc = Document(
         id=doc_id, source_path="test.txt",
-        raw_text_hash="sha256:abc", total_length=100,
+        raw_text_hash=_sha256("raw text for " + doc_id), total_length=100,
         block_count=1, created_at="2026-05-27T10:00:00Z",
     )
     store.save(doc)
@@ -27,7 +32,7 @@ def _setup_doc(store, doc_id="doc1"):
             id=f"{doc_id}_seg_{i:04d}", doc_id=doc_id,
             block_index=0, segment_type="sentence",
             start_offset=i * 20, end_offset=(i + 1) * 20,
-            text_slice="text " * 4, hash="sha256:abc",
+            text_slice="text " * 4, hash=_sha256("text " * 4),
         )
         store.save(seg)
 

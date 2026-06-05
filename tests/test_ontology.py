@@ -1,4 +1,12 @@
 """Tests for t2c/ontology.py — core object models."""
+import hashlib
+
+
+def _sha256(text: str) -> str:
+    """Compute sha256 hash of text and return with 'sha256:' prefix."""
+    return "sha256:" + hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
 from t2c.ontology import (
     Block,
     Claim,
@@ -17,13 +25,13 @@ from t2c.ontology import (
 
 class TestEvidenceRef:
     def test_create(self):
-        ref = EvidenceRef(segment_id="case_001_seg_0001", start=0, end=5, quote_hash="sha256:abc")
+        ref = EvidenceRef(segment_id="case_001_seg_0001", start=0, end=5, quote_hash=_sha256("Hello"[0:5]))
         assert ref.segment_id == "case_001_seg_0001"
         assert ref.start == 0
         assert ref.end == 5
 
     def test_serialization(self):
-        ref = EvidenceRef(segment_id="s1", start=0, end=10, quote_hash="sha256:abc")
+        ref = EvidenceRef(segment_id="s1", start=0, end=10, quote_hash=_sha256("Hello world"[0:10]))
         d = ref.model_dump()
         restored = EvidenceRef.model_validate(d)
         assert restored == ref
@@ -34,7 +42,7 @@ class TestDocument:
         doc = Document(
             id="case_001",
             source_path="case_001.txt",
-            raw_text_hash="sha256:abc",
+            raw_text_hash=_sha256("raw text content"),
             total_length=100,
             block_count=3,
             created_at="2026-05-27T10:00:00Z",
@@ -53,7 +61,7 @@ class TestBlock:
         b = Block(
             id="case_001_blk_0000",
             doc_id="case_001", index=0, block_type="paragraph",
-            start_offset=0, end_offset=50, text_slice="Hello", hash="sha256:abc",
+            start_offset=0, end_offset=50, text_slice="Hello", hash=_sha256("Hello"),
         )
         assert b.block_type == "paragraph"
 
@@ -63,7 +71,7 @@ class TestBlock:
             Block(
                 id="case_001_blk_0000",
                 doc_id="case_001", index=0, block_type="invalid_type",
-                start_offset=0, end_offset=50, text_slice="Hello", hash="sha256:abc",
+                start_offset=0, end_offset=50, text_slice="Hello", hash=_sha256("Hello"),
             )
 
 
@@ -77,7 +85,7 @@ class TestSegment:
             start_offset=0,
             end_offset=10,
             text_slice="Hello world",
-            hash="sha256:def",
+            hash=_sha256("Hello world"),
         )
         assert seg.segment_type == "sentence"
 
@@ -86,13 +94,13 @@ class TestSegment:
         with pytest.raises(Exception):
             Segment(
                 id="s1", doc_id="d1", block_index=0, segment_type="invalid",
-                start_offset=0, end_offset=5, text_slice="Hi", hash="sha256:x",
+                start_offset=0, end_offset=5, text_slice="Hi", hash=_sha256("Hi"),
             )
 
 
 class TestSemanticObjects:
     def test_entity_with_evidence(self):
-        ev = EvidenceRef(segment_id="s1", start=0, end=5, quote_hash="sha256:abc")
+        ev = EvidenceRef(segment_id="s1", start=0, end=5, quote_hash=_sha256("Alice"[0:5]))
         e = Entity(id="e1", name="Alice", kind="person", evidence_refs=[ev])
         assert len(e.evidence_refs) == 1
 
@@ -112,7 +120,7 @@ class TestSemanticObjects:
 
 class TestNearLosslessObjects:
     def test_residual(self):
-        ev = EvidenceRef(segment_id="s1", start=0, end=5, quote_hash="sha256:x")
+        ev = EvidenceRef(segment_id="s1", start=0, end=5, quote_hash=_sha256("implied threat"[0:5]))
         r = Residual(id="r1", segment_id="s1", category="pragmatic", importance="high", reason="implied threat", evidence_refs=[ev])
         assert r.importance == "high"
 

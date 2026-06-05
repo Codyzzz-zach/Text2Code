@@ -4,6 +4,11 @@ from t2c.ontology import Block
 from t2c.segmenter import Segmenter
 
 
+def _sha256(text: str) -> str:
+    import hashlib
+    return "sha256:" + hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
 def _make_block(text: str, block_type: str = "paragraph", index: int = 0) -> tuple[Block, str]:
     """Create a Block and its text for testing."""
     block = Block(
@@ -14,7 +19,7 @@ def _make_block(text: str, block_type: str = "paragraph", index: int = 0) -> tup
         start_offset=0,
         end_offset=len(text),
         text_slice=text,
-        hash=f"sha256:test",
+        hash=_sha256(text),
     )
     return block, text
 
@@ -146,7 +151,7 @@ class TestSegmentIntegrity:
         block = Block(
             id="test_blk_0000", doc_id="test", index=0,
             block_type="paragraph", start_offset=0, end_offset=len(text),
-            text_slice=text, hash="sha256:abc",
+            text_slice=text, hash=_sha256(text),
         )
         seg = Segmenter()
         segments = seg.segment_block("test", block, text)
@@ -162,7 +167,7 @@ class TestSegmentIntegrity:
         block = Block(
             id="test_blk_0000", doc_id="test", index=0,
             block_type="paragraph", start_offset=0, end_offset=len(text),
-            text_slice=text, hash="sha256:abc",
+            text_slice=text, hash=_sha256(text),
         )
         seg = Segmenter()
         segments = seg.segment_block("test", block, text)

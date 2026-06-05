@@ -1,155 +1,113 @@
-"""Graph API — query interface for the T2C knowledge graph."""
+"""Graph API — query the derived navigation graph."""
 from __future__ import annotations
 
-from typing import Any
-
-import networkx as nx
-
+from t2c.graph_builder import GraphBuilder
 from t2c.object_store import ObjectStore
-from t2c.ontology import EvidenceRef
 
 
 class GraphAPI:
-    def __init__(self, graph: nx.DiGraph, store: ObjectStore) -> None:
-        self._graph = graph
+    """Read-only query API over the derived navigation graph.
+
+    Graph results are NOT evidence — they must route back to code/raw.
+    """
+
+    def __init__(self, store: ObjectStore) -> None:
         self._store = store
+        self._graph: dict | None = None
 
-    def find_entities(self, name: str | None = None, kind: str | None = None) -> list[dict]:
-        results: list[dict] = []
-        for node_id, data in self._graph.nodes(data=True):
-            if data.get("type") != "Entity":
-                continue
-            obj = data.get("data", {})
-            if name and obj.get("name") != name:
-                continue
-            if kind and obj.get("kind") != kind:
-                continue
-            results.append(obj)
+    def _ensure_graph(self) -> dict:
+        if self._graph is None:
+            builder = GraphBuilder(self._store)
+            self._graph = builder.build_graph()
+        return self._graph
+
+    def get_node(self, node_id: str) -> dict | None:
+        graph = self._ensure_graph()
+        return graph["nodes"].get(node_id)
+
+    def get_neighbors(self, node_id: str) -> list[dict]:
+        """Get all edges connected to a node."""
+        graph = self._ensure_graph()
+        results = []
+        for edge in graph["edges"]:
+            if edge["source"] == node_id or edge["target"] == node_id:
+                results.append(edge)
         return results
 
-    def find_events(self, participant: str | None = None, kind: str | None = None) -> list[dict]:
-        results: list[dict] = []
-        for node_id, data in self._graph.nodes(data=True):
-            if data.get("type") != "Event":
+    def get_relations(self, entity_id: str, *, fact_only: bool = False) -> list[dict]:
+        """Get relation edges for an entity."""
+        graph = self._ensure_graph()
+        results = []
+        for edge in graph["edges"]:
+            if edge["source"] != entity_id:
                 continue
-            obj = data.get("data", {})
-            if kind and obj.get("kind") != kind:
+            if edge["type"] != edge.get("predicate", edge.get("type")):
                 continue
-            if participant and participant not in obj.get("participants", []):
+            if fact_only and edge.get("edge_class") != "fact":
                 continue
-            results.append(obj)
+            results.append(edge)
         return results
 
-    def find_claims(
-        self,
-        subject: str | None = None,
-        predicate: str | None = None,
-        object: str | None = None,
-        modality: str | None = None,
-    ) -> list[dict]:
-        results: list[dict] = []
-        for node_id, data in self._graph.nodes(data=True):
-            if data.get("type") != "Claim":
-                continue
-            obj = data.get("data", {})
-            if subject and obj.get("subject") != subject:
-                continue
-            if predicate and obj.get("predicate") != predicate:
-                continue
-            if object and obj.get("object") != object:
-                continue
-            if modality and obj.get("modality") != modality:
-                continue
-            results.append(obj)
-        return results
+    def get_evidence_refs(self, object_id: str) -> list[dict]:
+        """Get evidence refs for any stored object by its ID."""
+        from t2c.ontology import ONTOLOGY_CLASSES
+        for type_name, cls in ONTOLOGY_CLASSES.items():
+            obj = self._store.load(type_name, object_id)
+            if obj is not None:
+                refs = getattr(obj, "evidence_refs", None)
+                if refs:
+                    return [r.model_dump() if hasattr(r, "model_dump") else r for r in refs]
+                seg_ids = getattr(obj, "source_segment_ids", None)
+                if seg_ids:
+                    return [{"segment_id": sid, "type": "source_segment"} for sid in seg_ids]
+                return []
+        return []
 
-    def find_segments(
-        self,
-        status: str | None = None,
-        has_residual: bool | None = None,
-    ) -> list[dict]:
-        results: list[dict] = []
-        for node_id, data in self._graph.nodes(data=True):
-            if data.get("type") != "Segment":
+    def get_answer_context(self, object_id: str) -> dict:
+        """Get full context for an answer: code object + raw quote + coverage + residual."""
+        node = self.get_node(object_id)
+        evidence = self.get_evidence_refs(object_id)
+
+        # Try to load the raw object
+        raw_obj = None
+        from t2c.ontology import ONTOLOGY_CLASSES
+        for type_name, cls in ONTOLOGY_CLASSES.items():
+            loaded = self._store.load(type_name, object_id)
+            if loaded is not None:
+                raw_obj = loaded.model_dump()
+                break
+
+        # Get raw quotes from evidence refs
+        raw_quotes: list[dict] = []
+        for ref in evidence:
+            seg_id = ref.get("segment_id")
+            if not seg_id:
                 continue
-            if status and data.get("status") != status:
+            seg = self._store.load("Segment", seg_id)
+            if seg is None:
                 continue
-            seg_id = data.get("data", {}).get("id", node_id)
-            residuals = self._store.get_residuals_for_segment(seg_id)
-            if has_residual is True and not residuals:
-                continue
-            if has_residual is False and residuals:
-                continue
-            results.append(data.get("data", {}))
-        return results
+            start = ref.get("start")
+            end = ref.get("end")
+            if start is not None and end is not None:
+                raw_quotes.append({
+                    "segment_id": seg_id,
+                    "quote": seg.text_slice[start:end],
+                    "start": start,
+                    "end": end,
+                })
+            else:
+                raw_quotes.append({
+                    "segment_id": seg_id,
+                    "full_text": seg.text_slice,
+                })
 
-    def find_residuals(
-        self,
-        category: str | None = None,
-        importance: str | None = None,
-    ) -> list[dict]:
-        all_residuals = self._store.query("Residual")
-        results: list[dict] = []
-        for r in all_residuals:
-            if category and r.get("category") != category:
-                continue
-            if importance and r.get("importance") != importance:
-                continue
-            results.append(r)
-        return results
+        return {
+            "object_id": object_id,
+            "node": node,
+            "raw_object": raw_obj,
+            "evidence_refs": evidence,
+            "raw_quotes": raw_quotes,
+        }
 
-    def get_object(self, object_id: str) -> dict | None:
-        data = self._graph.nodes.get(object_id)
-        if data is None:
-            return None
-        return data.get("data")
-
-    def get_evidence(self, object_id: str) -> list[dict]:
-        evidence: list[dict] = []
-        obj = self.get_object(object_id)
-        if obj is None:
-            return evidence
-        for ref in obj.get("evidence_refs", []):
-            evidence.append(ref)
-        return evidence
-
-    def get_segment_coverage(self, segment_id: str) -> str:
-        data = self._graph.nodes.get(segment_id)
-        if data is None:
-            return "uncovered"
-        return data.get("status", "uncovered")
-
-    def trace_neighbors(self, object_id: str, depth: int = 1) -> dict:
-        result: dict = {"node": self.get_object(object_id), "neighbors": []}
-        if result["node"] is None:
-            return result
-
-        visited = {object_id}
-        current_level = {object_id}
-
-        for _ in range(depth):
-            next_level: set[str] = set()
-            for nid in current_level:
-                for successor in self._graph.successors(nid):
-                    if successor not in visited:
-                        visited.add(successor)
-                        next_level.add(successor)
-                        edge_data = self._graph.edges[nid, successor]
-                        result["neighbors"].append({
-                            "id": successor,
-                            "edge_type": edge_data.get("type"),
-                            "data": self.get_object(successor),
-                        })
-                for predecessor in self._graph.predecessors(nid):
-                    if predecessor not in visited:
-                        visited.add(predecessor)
-                        next_level.add(predecessor)
-                        edge_data = self._graph.edges[predecessor, nid]
-                        result["neighbors"].append({
-                            "id": predecessor,
-                            "edge_type": edge_data.get("type"),
-                            "data": self.get_object(predecessor),
-                        })
-            current_level = next_level
-
-        return result
+    def invalidate_cache(self) -> None:
+        self._graph = None

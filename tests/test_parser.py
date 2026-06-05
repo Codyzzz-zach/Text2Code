@@ -4,6 +4,11 @@ import pytest
 from t2c.parser import T2CParseError, T2CParser
 
 
+def _sha256(text: str) -> str:
+    import hashlib
+    return "sha256:" + hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
 @pytest.fixture
 def parser():
     return T2CParser()
@@ -17,7 +22,7 @@ from t2c.ontology import Document
 Document(
     id="test",
     source_path="test.txt",
-    raw_text_hash="sha256:abc",
+    raw_text_hash="''' + _sha256("") + '''",
     total_length=100,
     block_count=1,
     created_at="2026-05-27T10:00:00Z",
@@ -35,7 +40,7 @@ from t2c.ontology import Document, Block
 Document(
     id="test",
     source_path="test.txt",
-    raw_text_hash="sha256:abc",
+    raw_text_hash="''' + _sha256("") + '''",
     total_length=100,
     block_count=1,
     created_at="2026-05-27T10:00:00Z",
@@ -47,7 +52,7 @@ Block(
     start_offset=0,
     end_offset=100,
     text_slice="Hello",
-    hash="sha256:def",
+    hash="''' + _sha256("Hello") + '''",
 )
 '''
         objects = parser.parse_string(source)
@@ -67,12 +72,12 @@ Segment(
     start_offset=0,
     end_offset=5,
     text_slice="Hello",
-    hash="sha256:abc",
+    hash="''' + _sha256("Hello") + '''",
     evidence=EvidenceRef(
         segment_id="test_seg_0001",
         start=0,
         end=5,
-        quote_hash="sha256:abc",
+        quote_hash="''' + _sha256("Hello"[0:5]) + '''",
     ),
 )
 '''
@@ -97,7 +102,7 @@ Entity(
         segment_id="s1",
         start=0,
         end=5,
-        quote_hash="sha256:abc",
+        quote_hash="''' + _sha256("") + '''",
     )],
 )
 '''
@@ -149,7 +154,7 @@ Block(
     start_offset=0,
     end_offset=10,
     text_slice="test",
-    hash="sha256:abc",
+    hash="''' + _sha256("test") + '''",
 )
 '''
         objects = parser.parse_string(source)

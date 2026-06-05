@@ -8,6 +8,11 @@ from t2c.extractor import LLMExtractor
 from t2c.ontology import Segment
 
 
+def _sha256(text: str) -> str:
+    import hashlib
+    return "sha256:" + hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
 def _make_segment(seg_id="hongloumeng_seg_0001", text="测试文本。"):
     return Segment(
         id=seg_id,
@@ -17,8 +22,13 @@ def _make_segment(seg_id="hongloumeng_seg_0001", text="测试文本。"):
         start_offset=0,
         end_offset=len(text),
         text_slice=text,
-        hash="sha256:abc",
+        hash=_sha256(text),
     )
+
+
+def _make_extractor() -> LLMExtractor:
+    """Create an LLMExtractor with a mock client — no anthropic dependency needed."""
+    return LLMExtractor(_client=MagicMock())
 
 
 MOCK_RESPONSE_JSON = json.dumps([
@@ -69,7 +79,7 @@ MOCK_RESPONSE_JSON = json.dumps([
 
 class TestLLMExtractorParsing:
     def test_parse_clean_json(self):
-        extractor = LLMExtractor(api_key="fake-key")
+        extractor = _make_extractor()
         objects = extractor._parse_response(MOCK_RESPONSE_JSON)
         assert len(objects) == 4
         assert objects[0]["type"] == "Entity"
@@ -79,29 +89,29 @@ class TestLLMExtractorParsing:
         assert objects[3]["type"] == "Relation"
 
     def test_parse_json_in_code_block(self):
-        extractor = LLMExtractor(api_key="fake-key")
+        extractor = _make_extractor()
         wrapped = f"```json\n{MOCK_RESPONSE_JSON}\n```"
         objects = extractor._parse_response(wrapped)
         assert len(objects) == 4
 
     def test_parse_json_with_surrounding_text(self):
-        extractor = LLMExtractor(api_key="fake-key")
+        extractor = _make_extractor()
         text = f"Here are the results:\n{MOCK_RESPONSE_JSON}\nThat's all."
         objects = extractor._parse_response(text)
         assert len(objects) == 4
 
     def test_parse_empty_response(self):
-        extractor = LLMExtractor(api_key="fake-key")
+        extractor = _make_extractor()
         objects = extractor._parse_response("")
         assert objects == []
 
     def test_parse_invalid_json(self):
-        extractor = LLMExtractor(api_key="fake-key")
+        extractor = _make_extractor()
         objects = extractor._parse_response("not json at all")
         assert objects == []
 
     def test_counter_tracking(self):
-        extractor = LLMExtractor(api_key="fake-key")
+        extractor = _make_extractor()
         objects = extractor._parse_response(MOCK_RESPONSE_JSON)
         assert extractor._counters.get("ent") == 1
         assert extractor._counters.get("evt") == 1
@@ -129,18 +139,15 @@ class TestBuildEntityMap:
 
 
 class TestExtractChapterMocked:
-    @patch("t2c.extractor.anthropic.Anthropic")
-    def test_extract_chapter_calls_api(self, mock_anthropic_cls):
-        # Setup mock — simulate text block (not thinking block)
+    def test_extract_chapter_calls_api(self):
         mock_client = MagicMock()
-        mock_anthropic_cls.return_value = mock_client
         mock_text_block = MagicMock(type="text", text=MOCK_RESPONSE_JSON)
         mock_message = MagicMock()
         mock_message.content = [mock_text_block]
         mock_message.stop_reason = "end_turn"
         mock_client.messages.create.return_value = mock_message
 
-        extractor = LLMExtractor(api_key="fake-key")
+        extractor = LLMExtractor(_client=mock_client)
         segments = [
             _make_segment("hongloumeng_seg_0001", "甄士隐住在姑苏。"),
             _make_segment("hongloumeng_seg_0002", "他做了一个梦。"),
@@ -160,17 +167,15 @@ class TestExtractChapterMocked:
         assert "hongloumeng_seg_0001" in prompt
         assert "甄士隐" in prompt
 
-    @patch("t2c.extractor.anthropic.Anthropic")
-    def test_extract_with_existing_entities(self, mock_anthropic_cls):
+    def test_extract_with_existing_entities(self):
         mock_client = MagicMock()
-        mock_anthropic_cls.return_value = mock_client
         mock_text_block = MagicMock(type="text", text=MOCK_RESPONSE_JSON)
         mock_message = MagicMock()
         mock_message.content = [mock_text_block]
         mock_message.stop_reason = "end_turn"
         mock_client.messages.create.return_value = mock_message
 
-        extractor = LLMExtractor(api_key="fake-key")
+        extractor = LLMExtractor(_client=mock_client)
         segments = [_make_segment()]
         existing = {"甄士隐": "hongloumeng_ent_0001"}
         objects = extractor.extract_chapter(
@@ -190,7 +195,7 @@ class TestExtractChapterMocked:
 
 class TestNormalizeIds:
     def test_normalize_char_to_ent(self):
-        extractor = LLMExtractor(api_key="fake-key")
+        extractor = _make_extractor()
         objects = [
             {"type": "Entity", "data": {
                 "id": "hongloumeng_char_0001", "name": "甄士隐", "kind": "person",
@@ -229,7 +234,7 @@ class TestNormalizeIds:
         assert result[4]["data"]["object"] == "hongloumeng_ent_0002"
 
     def test_no_normalize_when_ids_correct(self):
-        extractor = LLMExtractor(api_key="fake-key")
+        extractor = _make_extractor()
         objects = [
             {"type": "Entity", "data": {
                 "id": "hongloumeng_ent_0001", "name": "甄士隐",
@@ -243,7 +248,7 @@ class TestNormalizeIds:
 
 class TestValidateGrounding:
     def test_trim_ungrounded_alias(self):
-        extractor = LLMExtractor(api_key="fake-key")
+        extractor = _make_extractor()
         segments = [
             _make_segment("seg1", "甄士隐住在姑苏城中。"),
             _make_segment("seg2", "封肃是本地人。"),
@@ -260,7 +265,7 @@ class TestValidateGrounding:
         assert "疯道人" not in result[0]["data"]["aliases"]
 
     def test_keep_grounded_alias(self):
-        extractor = LLMExtractor(api_key="fake-key")
+        extractor = _make_extractor()
         segments = [_make_segment("seg1", "甄士隐做梦。士隐惊醒。")]
         objects = [
             {"type": "Entity", "data": {
@@ -273,7 +278,7 @@ class TestValidateGrounding:
         assert "士隐" in result[0]["data"]["aliases"]
 
     def test_recover_alias_from_broader_segments(self):
-        extractor = LLMExtractor(api_key="fake-key")
+        extractor = _make_extractor()
         segments = [
             _make_segment("seg1", "此人姓甄。"),
             _make_segment("seg2", "士隐惊醒后出门。"),
@@ -289,3 +294,109 @@ class TestValidateGrounding:
         assert "士隐" in result[0]["data"]["aliases"]
         # Should also add seg2 to source_segment_ids since alias was found there
         assert "seg2" in result[0]["data"]["source_segment_ids"]
+
+
+class TestLazyImport:
+    def test_extractor_without_anthropics_raises_import_error(self):
+        """When anthropic is not installed and no _client is given, raise clear ImportError."""
+        import t2c.extractor as ext_mod
+        original = ext_mod.anthropic
+        try:
+            ext_mod.anthropic = None
+            with pytest.raises(ImportError, match="optional anthropic dependency"):
+                LLMExtractor(api_key="fake-key")
+        finally:
+            ext_mod.anthropic = original
+
+    def test_extractor_with_mock_client_works(self):
+        """When _client is provided, no anthropic import is needed."""
+        mock_client = MagicMock()
+        extractor = LLMExtractor(_client=mock_client)
+        assert extractor._client is mock_client
+
+
+class TestMaxTokensConfig:
+    """v3.4.1: configurable max_tokens and thinking_budget."""
+
+    def test_default_max_tokens_is_32768(self):
+        ext = LLMExtractor(_client=MagicMock())
+        assert ext._max_tokens == 32768
+
+    def test_default_thinking_budget_is_2048(self):
+        ext = LLMExtractor(_client=MagicMock())
+        assert ext._thinking_budget == 2048
+
+    def test_explicit_max_tokens_overrides_default(self):
+        ext = LLMExtractor(_client=MagicMock(), max_tokens=8192)
+        assert ext._max_tokens == 8192
+
+    def test_explicit_thinking_budget_overrides_default(self):
+        ext = LLMExtractor(_client=MagicMock(), thinking_budget=1024)
+        assert ext._thinking_budget == 1024
+
+    def test_env_var_overrides_default_max_tokens(self, monkeypatch):
+        monkeypatch.setenv("T2C_MAX_TOKENS", "65536")
+        ext = LLMExtractor(_client=MagicMock())
+        assert ext._max_tokens == 65536
+
+    def test_env_var_overrides_default_thinking_budget(self, monkeypatch):
+        monkeypatch.setenv("T2C_THINKING_BUDGET", "512")
+        ext = LLMExtractor(_client=MagicMock())
+        assert ext._thinking_budget == 512
+
+    def test_explicit_arg_beats_env_var(self, monkeypatch):
+        monkeypatch.setenv("T2C_MAX_TOKENS", "9999")
+        ext = LLMExtractor(_client=MagicMock(), max_tokens=4096)
+        assert ext._max_tokens == 4096
+
+    def test_max_batch_chars_default_is_900(self):
+        # Imported lazily so the test also serves as a guard against accidental
+        # reverts to 1500.
+        from t2c.extractor import _MAX_BATCH_CHARS
+        assert _MAX_BATCH_CHARS == 900
+
+    def test_telemetry_fields_initialized(self):
+        ext = LLMExtractor(_client=MagicMock())
+        assert ext._last_batch_truncated is False
+        assert ext._total_input_tokens == 0
+        assert ext._total_output_tokens == 0
+        assert ext._api_elapsed_sec == 0.0
+
+
+class TestPartialRecovery:
+    """v3.4.1: _recover_partial_objects salvages complete {...} blocks from truncated JSON."""
+
+    def test_recovers_complete_object_before_truncation(self):
+        text = (
+            '[{"type": "Entity", "data": {"id": "d_ent_0001", "name": "Alice", '
+            '"kind": "person"}}, {"type": "Event", "data": {"id": "d_evt_0001"'
+        )
+        rec = LLMExtractor._recover_partial_objects(None, text)  # type: ignore[arg-type]
+        # Bound method: pass instance.
+        rec = LLMExtractor(_client=MagicMock())._recover_partial_objects(text)
+        assert len(rec) == 1
+        assert rec[0]["type"] == "Entity"
+        assert rec[0]["data"]["id"] == "d_ent_0001"
+
+    def test_returns_empty_when_no_complete_objects(self):
+        text = '[{"type": "Entity", "data": {"id": "d_ent_0001", "name":'
+        rec = LLMExtractor(_client=MagicMock())._recover_partial_objects(text)
+        assert rec == []
+
+    def test_strips_markdown_fences_before_scan(self):
+        text = '```json\n[{"type": "Entity", "data": {"id": "x", "name": "y"}},\n'
+        rec = LLMExtractor(_client=MagicMock())._recover_partial_objects(text)
+        assert len(rec) == 1
+        assert rec[0]["data"]["id"] == "x"
+
+    def test_normalizes_flat_format(self):
+        text = '[{"type": "Entity", "id": "x", "name": "y"}'
+        rec = LLMExtractor(_client=MagicMock())._recover_partial_objects(text)
+        assert len(rec) == 1
+        assert rec[0] == {"type": "Entity", "data": {"id": "x", "name": "y"}}
+
+    def test_handles_nested_braces_in_strings(self):
+        text = '[{"type": "Entity", "data": {"id": "x", "name": "{nested}"}}'
+        rec = LLMExtractor(_client=MagicMock())._recover_partial_objects(text)
+        assert len(rec) == 1
+        assert rec[0]["data"]["name"] == "{nested}"
