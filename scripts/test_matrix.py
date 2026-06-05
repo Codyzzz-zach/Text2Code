@@ -78,6 +78,9 @@ PROFILES: dict[str, list[str]] = {
     "full": [
         "tests",
     ],
+    "quality": [
+        # Quality profile runs quality_check.py --json and fails under threshold
+    ],
 }
 
 
@@ -145,6 +148,103 @@ def tail(text: str, max_chars: int = 4000) -> str:
 
 
 def run_profile(profile: str, extra_pytest_args: list[str]) -> TestRun:
+    # Quality profile runs quality_check.py directly, not pytest
+    if profile == "quality":
+        start = time.perf_counter()
+        quality_script = PROJECT_ROOT / "scripts" / "quality_check.py"
+
+        # Default thresholds for quality gate
+        quality_thresholds = {
+            "grounding_rate_min": 0.70,
+            "reference_issue_max": 10,
+            "entity_conflict_max": 5,
+        }
+
+        proc = subprocess.run(
+            [sys.executable, str(quality_script), "--json"],
+            cwd=PROJECT_ROOT,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        duration = time.perf_counter() - start
+
+        # Parse JSON metrics from output
+        passed = 0
+        failed = 0
+        metrics: dict = {}
+        try:
+            # Try parsing entire stdout as JSON first
+            metrics = json.loads(proc.stdout.strip())
+        except json.JSONDecodeError:
+            # Try extracting JSON block (may have text prefix)
+            for line in proc.stdout.split("\n"):
+                stripped = line.strip()
+                if stripped.startswith("{"):
+                    try:
+                        metrics = json.loads(stripped)
+                        if "grounding_rate" in metrics:
+                            break
+                    except json.JSONDecodeError:
+                        pass
+            if not metrics:
+                # Try from first { to end
+                idx = proc.stdout.find("{")
+                if idx >= 0:
+                    try:
+                        metrics = json.loads(proc.stdout[idx:])
+                    except json.JSONDecodeError:
+                        pass
+
+        if not metrics or "grounding_rate" not in metrics:
+            return TestRun(
+                profile=profile,
+                purpose="Quality metrics check (grounding, references, coverage).",
+                status="fail",
+                returncode=1,
+                duration_seconds=round(duration, 2),
+                command=[sys.executable, "scripts/quality_check.py", "--json"],
+                tests={"passed": 0, "failed": 1, "errors": 1, "skipped": 0, "warnings": 0},
+                stdout_tail=tail(proc.stdout),
+                stderr_tail=tail(proc.stderr),
+            )
+
+        # Evaluate thresholds
+        failures = []
+        gr = metrics.get("grounding_rate", 0)
+        ri = metrics.get("reference_issue_count", 999)
+        ec = metrics.get("entity_conflict_count", 999)
+
+        if gr < quality_thresholds["grounding_rate_min"]:
+            failures.append(f"grounding_rate {gr:.2%} < {quality_thresholds['grounding_rate_min']:.0%}")
+        if ri > quality_thresholds["reference_issue_max"]:
+            failures.append(f"reference_issue_count {ri} > {quality_thresholds['reference_issue_max']}")
+        if ec > quality_thresholds["entity_conflict_max"]:
+            failures.append(f"entity_conflict_count {ec} > {quality_thresholds['entity_conflict_max']}")
+
+        passed = 1 if len(failures) == 0 else 0
+        failed = len(failures)
+        status = "pass" if len(failures) == 0 else "fail"
+        returncode = 0 if len(failures) == 0 else 1
+
+        combined = f"{proc.stdout}\n--- thresholds ---\n"
+        if failures:
+            combined += "FAILURES:\n" + "\n".join(failures) + "\n"
+        else:
+            combined += "All thresholds met.\n"
+
+        return TestRun(
+            profile=profile,
+            purpose=f"Quality gate: grounding≥{quality_thresholds['grounding_rate_min']:.0%}, refs≤{quality_thresholds['reference_issue_max']}, conflicts≤{quality_thresholds['entity_conflict_max']}.",
+            status=status,
+            returncode=returncode,
+            duration_seconds=round(duration, 2),
+            command=[sys.executable, "scripts/quality_check.py", "--json"],
+            tests={"passed": passed, "failed": failed, "errors": 0, "skipped": 0, "warnings": 0},
+            stdout_tail=tail(combined),
+            stderr_tail=tail(proc.stderr),
+        )
+
     command = build_command(profile, extra_pytest_args)
     start = time.perf_counter()
     proc = subprocess.run(

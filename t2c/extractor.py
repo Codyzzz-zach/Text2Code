@@ -1,4 +1,23 @@
-"""LLM Extractor — extract semantic objects from text segments using Claude API."""
+"""LLM Extractor — extract semantic objects from text segments using Claude API.
+
+Two extraction protocols are supported:
+
+* ``verbose-v1`` (legacy): the LLM emits full ``{"type": ..., "data": {...}}``
+  objects, including Relation and EvidenceRef directly. This is the original
+  v3.4 behavior — kept for backward compatibility with already-generated
+  knowledge files and existing tests.
+
+* ``compact-v1`` (default since v3.4.2): the LLM emits short-key compact
+  candidates that the program expands into verbose objects. Relation is
+  derived from Claim (modality=asserted, polarity=positive, entity-entity);
+  EvidenceRef is generated from the LLM-supplied ``q`` (quote) list by
+  locating the quote inside Segment.text_slice and computing the hash.
+  Residual is reserved for a separate second stage (see
+  ``t2c.compact_candidate`` and ``t2c.residual_stage``).
+
+When the ``compact-v1`` protocol is active, every LLM batch is wrapped by
+an LLMCache lookup so repeat runs are free.
+"""
 from __future__ import annotations
 
 import json
@@ -8,6 +27,13 @@ import re
 import time
 from typing import Any
 
+from t2c.compact_candidate import (
+    COMPACT_TYPE_ENTITY,
+    derive_relations,
+    expand_candidates,
+    parse_compact_response,
+)
+from t2c.llm_cache import CacheEntry, CacheMode, LLMCache, compute_cache_key
 from t2c.ontology import Segment
 
 logger = logging.getLogger(__name__)
@@ -115,20 +141,101 @@ EXTRACTION_PROMPT = """\
 请直接返回 JSON 数组，不要添加任何解释文本。不要用 markdown 代码块包裹。
 """
 
-# Max segment text per single LLM call — MiniMax-M3 thinking uses tokens aggressively,
-# so keep input small enough that output fits within max_tokens.
-# v3.4.1: reduced from 1500 to 900 to ensure v3.4's larger prompt (Residual/IgnoreSegment
-# + loss declaration) doesn't cause max_tokens truncation in the response.
-_MAX_BATCH_CHARS = 900
+# Compact prompt used by extractor_protocol="compact-v1". Mirrors the verbose
+# prompt's intent but uses short keys to keep output tokens low, and asks the
+# LLM NOT to emit Relation (program-derived) or EvidenceRef (computed from
+# `q` quotes). Residual is intentionally absent here — it is a separate
+# second-stage concern.
+COMPACT_PROMPT = """\
+你是一个文学文本结构化专家。从以下《红楼梦》第{chapter_num}回「{chapter_title}」的文本中提取**紧凑**候选对象。
 
-# Default output cap. v3.4.1: bumped from 16384 to 32768 because v3.4's expanded
-# prompt (94 lines) plus Residual/IgnoreSection loss declaration produces richer
-# candidate outputs that need more response room.
-_DEFAULT_MAX_TOKENS = 32768
+## 输入文本
+
+每行格式：`[segment_id] 文本内容`
+
+{segments_formatted}
+
+{existing_entities_section}
+
+## 输出要求
+
+**只输出 JSON 数组**。每个元素是单个候选对象，字段尽量短。只用以下四种 type：
+
+### E = Entity（实体）
+```json
+{{"t":"E","lid":"e1","n":"甄士隐","k":"person","a":["士隐"],"sid":["hongloumeng_seg_0009"],"q":["甄士隐"]}}
+```
+- `lid` = 本批内有效 local id（其他候选可引用）
+- `n` = 实体名，`k` = kind（person/location/org/artifact/concept）
+- `a` = 其他称呼列表，可省
+- `sid` = 出现的 segment id 列表
+- `q` = 用于 EvidenceRef 定位的原文引用片段列表，可省
+
+### EV = Event（事件）
+```json
+{{"t":"EV","n":"甄士隐做梦","k":"occurrence","p":["e1"],"sid":["hongloumeng_seg_0015"],"q":["梦"]}}
+```
+- `p` = 参与者 entity id 列表（lid 或已知 entity id）
+
+### C = Claim（声明）
+```json
+{{"t":"C","s":"e1","p":"lives_in","o":"姑苏","m":"asserted","pol":"positive","sid":["seg1"],"q":["姑苏"]}}
+```
+- `s` = subject (entity id or lid)
+- `p` = predicate
+- `o` = object (entity id, lid, or literal string)
+- `m` = modality (asserted/reported/claimed_by_source/uncertain/hypothetical/conditional/inferred)
+- `pol` = polarity (positive/negative)
+
+### I = IgnoreSegment（忽略）
+```json
+{{"t":"I","sid":"seg1","r":"chapter title"}}
+```
+- `r` = 忽略原因
+
+## 严禁输出
+
+- **R (Relation)** — 由程序从 Claim 自动派生（仅 modality=asserted + polarity=positive + entity-entity + 有证据）
+- **EvidenceRef 字段（start/end/quote_hash）** — 由程序从 `q` 引用片段定位
+- Residual — 留到第二阶段
+- Markdown 包裹
+- 任何解释文本
+
+## 核心原则
+
+1. 同一人物用相同 lid；跨实体引用时优先用本批的 lid
+2. 不确定信息用 modality=uncertain，不要硬上 asserted
+3. 转述/对白用 reported 或 claimed_by_source
+4. `q` 给出一小段原文引用即可，程序会精确定位并算 hash
+5. `sid` 必须是输入中真实存在的 segment id
+6. 不编造，不推断，找不到的宁可不写
+
+请直接返回紧凑 JSON 数组。
+"""
+
+# Max segment text per single LLM call.
+# v3.4.2: 1200 chars / batch — paired with the compact protocol and a
+# shorter prompt, this keeps input tokens modest while still letting
+# multiple segments land in a single batch.
+_MAX_BATCH_CHARS = 1200
+
+# Default output cap.
+# v3.4.2: lowered from 32768 to 8192. The compact protocol is much terser
+# than verbose, so a 32K ceiling mostly encourages verbose output. 8192
+# is enough for ~40 compact candidates with room to spare.
+_DEFAULT_MAX_TOKENS = 8192
 # Env var override — convenient for one-off runs without code changes.
 _MAX_TOKENS_ENV = "T2C_MAX_TOKENS"
 _THINKING_BUDGET_ENV = "T2C_THINKING_BUDGET"
-_DEFAULT_THINKING_BUDGET = 2048
+# v3.4.2: lowered from 2048 to 1024. Compact candidates don't need deep
+# deliberation; we want the budget spent on output tokens.
+_DEFAULT_THINKING_BUDGET = 1024
+
+# Default protocol + prompt version. Bump either to force a cache wipe.
+_DEFAULT_EXTRACTOR_PROTOCOL = "compact-v1"
+_DEFAULT_PROMPT_VERSION = "compact-main-v1"
+_VERBOSE_EXTRACTOR_PROTOCOL = "verbose-v1"
+_VERBOSE_PROMPT_VERSION = "verbose-main-v1"
 
 
 class LLMExtractor:
@@ -142,6 +249,10 @@ class LLMExtractor:
         *,
         max_tokens: int | None = None,
         thinking_budget: int | None = None,
+        extractor_protocol: str | None = None,
+        prompt_version: str | None = None,
+        cache_mode: CacheMode | str | None = None,
+        cache_dir: str | None = None,
         _client: Any = None,
     ) -> None:
         if _client is not None:
@@ -169,6 +280,39 @@ class LLMExtractor:
         else:
             env_val = os.environ.get(_THINKING_BUDGET_ENV)
             self._thinking_budget = int(env_val) if env_val else _DEFAULT_THINKING_BUDGET
+        # Protocol + prompt version. v3.4.2 default is the compact protocol;
+        # callers can opt back into verbose by passing
+        # extractor_protocol="verbose-v1".
+        if extractor_protocol is None:
+            self._protocol = _DEFAULT_EXTRACTOR_PROTOCOL
+        else:
+            self._protocol = str(extractor_protocol)
+        if prompt_version is None:
+            self._prompt_version = (
+                _VERBOSE_PROMPT_VERSION if self._protocol == _VERBOSE_EXTRACTOR_PROTOCOL
+                else _DEFAULT_PROMPT_VERSION
+            )
+        else:
+            self._prompt_version = str(prompt_version)
+        # Cache: mode is required; dir defaults to .t2c_cache/llm/v1.
+        if cache_mode is None:
+            mode_str = os.environ.get("T2C_CACHE_MODE", CacheMode.OFF.value)
+            self._cache_mode = CacheMode(mode_str)
+        elif isinstance(cache_mode, CacheMode):
+            self._cache_mode = cache_mode
+        else:
+            self._cache_mode = CacheMode(str(cache_mode))
+        env_cache_dir = os.environ.get("T2C_CACHE_DIR")
+        self._cache_dir = cache_dir or env_cache_dir or None
+        self._cache: LLMCache | None
+        if self._cache_mode == CacheMode.OFF:
+            self._cache = None
+        else:
+            self._cache = LLMCache(cache_dir=self._cache_dir)
+        # Telemetry for cache hits/misses — Pipeline / scripts can read these.
+        self._cache_hits: int = 0
+        self._cache_misses: int = 0
+        self._cache_lookups: int = 0
         # Track per-type counters across calls for consistent ID assignment
         self._counters: dict[str, int] = {}
         # Telemetry for the most recent extract_chapter / extract_batch call.
@@ -177,6 +321,9 @@ class LLMExtractor:
         self._total_input_tokens: int = 0
         self._total_output_tokens: int = 0
         self._api_elapsed_sec: float = 0.0
+        # Carry over pre-existing entity map state from a previous run
+        # (callers can update via _seed_entity_map).
+        self._seed_entities: dict[str, str] = {}
 
     def _next_index(self, type_key: str) -> int:
         idx = self._counters.get(type_key, 0) + 1
@@ -208,23 +355,45 @@ class LLMExtractor:
         self._total_output_tokens = 0
         self._api_elapsed_sec = 0.0
         self._last_batch_truncated = False
+        self._cache_hits = 0
+        self._cache_misses = 0
+        self._cache_lookups = 0
 
         # Split into batches if total text is too long
         batches = self._batch_segments(segments)
+        is_compact = self._protocol != _VERBOSE_EXTRACTOR_PROTOCOL
 
+        # Single-batch fast path
         if len(batches) == 1:
+            if is_compact:
+                return self._extract_batch_compact(
+                    doc_id, chapter_num, chapter_title,
+                    segments, existing_entities, batch_index=0,
+                )
             return self._extract_batch(doc_id, chapter_num, chapter_title, segments, existing_entities)
 
         # Multi-batch: extract each batch, then merge
         all_objects: list[dict] = []
         batch_entities = dict(existing_entities or {})
+        # Seed the cross-batch entity map with anything the caller pre-loaded
+        # (e.g. from a previous chapter's run).
+        if self._seed_entities:
+            batch_entities.update(self._seed_entities)
         pre_entity_count = len(batch_entities)
         truncated_batches = 0
 
         for i, batch in enumerate(batches):
             logger.info("Ch%d batch %d/%d: %d segments", chapter_num, i + 1, len(batches), len(batch))
             try:
-                objects = self._extract_batch(doc_id, chapter_num, chapter_title, batch, batch_entities)
+                if is_compact:
+                    objects = self._extract_batch_compact(
+                        doc_id, chapter_num, chapter_title,
+                        batch, batch_entities, batch_index=i,
+                    )
+                else:
+                    objects = self._extract_batch(
+                        doc_id, chapter_num, chapter_title, batch, batch_entities,
+                    )
             except Exception as exc:
                 # v3.4.1: an LLM-side error (safety filter, rate limit, network) on
                 # one batch must not abort the whole chapter. Log loudly and skip.
@@ -332,6 +501,269 @@ class LLMExtractor:
         # Trim ungrounded aliases
         objects = self._validate_grounding(objects, segments)
         return objects
+
+    def _seed_entity_map(self, mapping: dict[str, str]) -> None:
+        """Pre-load entity name→id mapping (e.g. from a previous run).
+
+        Useful when multiple chapters share characters and we want the
+        second chapter to reuse the first chapter's entity ids without
+        having to re-extract them.
+        """
+        self._seed_entities.update(mapping)
+
+    def _extract_batch_compact(
+        self,
+        doc_id: str,
+        chapter_num: int,
+        chapter_title: str,
+        segments: list[Segment],
+        existing_entities: dict[str, str] | None,
+        *,
+        batch_index: int,
+    ) -> list[dict]:
+        """Extract compact candidates and expand to verbose objects.
+
+        This is the v3.4.2 path. Differences from ``_extract_batch``:
+
+        * Uses the compact prompt.
+        * Looks up the batch in LLMCache before calling the model.
+        * Parses the response as compact JSON and expands to verbose form
+          (with EvidenceRef computed from `q` quotes, Relation derived
+          from eligible Claims).
+        """
+        seg_ids = [s.id for s in segments]
+        seg_hashes = [s.hash for s in segments]
+        options = {
+            "max_tokens": self._max_tokens,
+            "thinking_budget": self._thinking_budget,
+            "temperature": 0,
+        }
+        cache_key = compute_cache_key(
+            doc_id=doc_id,
+            chapter_num=chapter_num,
+            chapter_title=chapter_title,
+            batch_index=batch_index,
+            segment_ids=seg_ids,
+            segment_hashes=seg_hashes,
+            known_entities=existing_entities,
+            model=self._model,
+            prompt_version=self._prompt_version,
+            extractor_protocol=self._protocol,
+            options=options,
+        )
+
+        # Cache lookup
+        if self._cache is not None and self._cache_mode != CacheMode.OFF:
+            self._cache_lookups += 1
+            entry = self._cache.lookup(cache_key)
+            if entry is not None and self._cache_mode != CacheMode.REFRESH:
+                self._cache_hits += 1
+                logger.info(
+                    "Ch%d batch %d: cache hit key=%s",
+                    chapter_num, batch_index + 1, cache_key[:24] + "...",
+                )
+                objects, parse_warnings = self._expand_cached_entry(
+                    entry, segments, doc_id,
+                )
+                self._last_batch_truncated = bool(
+                    entry.quality.get("truncated", False)
+                )
+                return objects
+
+        if self._cache_mode == CacheMode.READ_ONLY:
+            # v3.4.2 contract: read_only + miss = explicit failure.
+            raise FileNotFoundError(
+                f"Cache miss for batch {doc_id} ch{chapter_num} batch {batch_index + 1} "
+                f"(key={cache_key[:24]}...). "
+                f"Run with cache_mode=read_write or refresh to populate cache."
+            )
+
+        self._cache_misses += 1
+
+        # Build the compact prompt and call the model.
+        prompt = self._build_compact_prompt(
+            doc_id, chapter_num, chapter_title, segments, existing_entities,
+        )
+        kwargs: dict[str, Any] = {
+            "model": self._model,
+            "max_tokens": self._max_tokens,
+            "messages": [{"role": "user", "content": prompt}],
+        }
+        t0 = time.time()
+        response = None
+        try:
+            kwargs["thinking"] = {"type": "enabled", "budget_tokens": self._thinking_budget}
+            response = self._client.messages.create(**kwargs)
+        except TypeError:
+            kwargs.pop("thinking", None)
+            try:
+                response = self._client.messages.create(**kwargs)
+            except ValueError:
+                response = self._stream_response(kwargs)
+        except ValueError:
+            response = self._stream_response(kwargs)
+        elapsed = time.time() - t0
+
+        usage = getattr(response, "usage", None)
+        # Cast to int — MagicMock attribute access returns MagicMock, which
+        # is truthy and would otherwise flow into the cache entry as a
+        # non-serializable object.
+        input_tokens = int(getattr(usage, "input_tokens", 0) or 0) if usage else 0
+        output_tokens = int(getattr(usage, "output_tokens", 0) or 0) if usage else 0
+        self._total_input_tokens += input_tokens
+        self._total_output_tokens += output_tokens
+        self._api_elapsed_sec += elapsed
+
+        truncated = response.stop_reason == "max_tokens"
+        self._last_batch_truncated = truncated
+        response_text = self._get_text_from_response(response) or ""
+        if not response_text:
+            logger.warning(
+                "Ch%d batch %d: no text content (stop_reason=%s)",
+                chapter_num, batch_index + 1, response.stop_reason,
+            )
+            return []
+
+        # Parse + expand
+        objects = self._postprocess_compact_response(
+            response_text, segments, doc_id,
+        )
+
+        # Cache store (only on read_write or refresh; never on read_only).
+        if self._cache is not None and self._cache_mode in (
+            CacheMode.READ_WRITE, CacheMode.REFRESH,
+        ):
+            entry = CacheEntry(
+                cache_schema="t2c-llm-cache-v1",
+                cache_key=cache_key,
+                created_at=LLMCache.now_iso(),
+                request={
+                    "model": self._model,
+                    "prompt_version": self._prompt_version,
+                    "extractor_protocol": self._protocol,
+                    "segments": [
+                        {"id": s.id, "hash": s.hash, "text": s.text_slice}
+                        for s in segments
+                    ],
+                    "known_entities": dict(existing_entities or {}),
+                },
+                response={
+                    "raw_text": response_text,
+                    "parsed_candidates": objects,
+                    "stop_reason": response.stop_reason,
+                    "input_tokens": input_tokens,
+                    "output_tokens": output_tokens,
+                    "elapsed_sec": elapsed,
+                },
+                quality={
+                    "parse_ok": bool(objects) or not response_text.strip(),
+                    "truncated": truncated,
+                    "recovered_partial": False,
+                },
+            )
+            try:
+                self._cache.store(entry)
+            except (OSError, TypeError, ValueError) as exc:
+                # TypeError/ValueError covers non-serializable entries (e.g.
+                # from a buggy mock client); OSError covers disk failures.
+                logger.warning("LLMCache: failed to write %s: %s", cache_key, exc)
+
+        return objects
+
+    def _postprocess_compact_response(
+        self,
+        response_text: str,
+        segments: list[Segment],
+        doc_id: str,
+    ) -> list[dict]:
+        """Parse compact JSON, expand to verbose form, derive Relations.
+
+        Always runs even on truncated responses — the parser falls back
+        to brace-balanced recovery when the JSON array itself is invalid.
+        """
+        candidates = parse_compact_response(response_text)
+        objects, expand_warnings = expand_candidates(
+            candidates, segments, doc_id,
+        )
+        for w in expand_warnings:
+            logger.debug("Ch expand: %s", w)
+
+        # Normalize wrong ID prefixes (defensive — LLM might still emit them).
+        objects = self._normalize_ids(objects, doc_id)
+        # Auto-assign IDs in case any candidate slipped through without one.
+        objects = self._assign_missing_ids(objects, doc_id)
+        # Trim ungrounded aliases — keeps the same invariant the verbose
+        # path enforces.
+        objects = self._validate_grounding(objects, segments)
+
+        # Derive Relations from eligible Claims (asserted + positive +
+        # entity-entity + has evidence).
+        entity_ids = {
+            o["data"]["id"] for o in objects if o.get("type") == "Entity"
+        }
+        relations, rel_warnings = derive_relations(
+            objects, entity_ids, doc_id=doc_id,
+        )
+        for w in rel_warnings:
+            logger.debug("Ch relation: %s", w)
+        objects.extend(relations)
+        return objects
+
+    def _expand_cached_entry(
+        self,
+        entry: CacheEntry,
+        segments: list[Segment],
+        doc_id: str,
+    ) -> tuple[list[dict], list[str]]:
+        """Reconstruct the verbose object list from a cached entry.
+
+        The cached entry stores the already-expanded verbose form, so we
+        just return it after a defensive parse-OK check. If the cache
+        entry predates the compact protocol (e.g. a manually-imported
+        verbose cache), we re-run the expand on the raw text.
+        """
+        parsed = entry.response.get("parsed_candidates")
+        if isinstance(parsed, list) and parsed:
+            # Honor any tokens/elapsed the cache recorded (so repeated
+            # runs still show cost in the run summary).
+            self._total_input_tokens += int(
+                entry.response.get("input_tokens", 0) or 0
+            )
+            self._total_output_tokens += int(
+                entry.response.get("output_tokens", 0) or 0
+            )
+            self._api_elapsed_sec += float(
+                entry.response.get("elapsed_sec", 0.0) or 0.0
+            )
+            return list(parsed), []
+        # Fall back: re-run the expander on the raw text.
+        return self._postprocess_compact_response(
+            entry.response.get("raw_text", ""),
+            segments, doc_id,
+        ), []
+
+    def _build_compact_prompt(
+        self,
+        doc_id: str,
+        chapter_num: int,
+        chapter_title: str,
+        segments: list[Segment],
+        existing_entities: dict[str, str] | None,
+    ) -> str:
+        segments_formatted = "\n".join(
+            f"[{s.id}] {s.text_slice}" for s in segments
+        )
+        if existing_entities:
+            lines = [f"- {eid}: {name}" for name, eid in existing_entities.items()]
+            existing_section = "## 已知人物（前几回已提取，直接复用其 ID）\n\n" + "\n".join(lines)
+        else:
+            existing_section = ""
+        return COMPACT_PROMPT.format(
+            chapter_num=chapter_num,
+            chapter_title=chapter_title,
+            segments_formatted=segments_formatted,
+            existing_entities_section=existing_section,
+        )
 
     def _stream_response(self, kwargs: dict[str, Any]) -> Any:
         """Issue a streaming request and re-assemble the events into a response-shaped object.

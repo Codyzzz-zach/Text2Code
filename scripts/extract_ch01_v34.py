@@ -17,8 +17,14 @@ import sys
 import time
 from pathlib import Path
 
-# v3.4.1: ensure default max_tokens=32768 unless caller overrides.
-os.environ.setdefault("T2C_MAX_TOKENS", "32768")
+# v3.4.2: respect explicit env override; default to the new compact-protocol
+# budget (8192) when nothing is set. For a fair A/B against v3.4.1's verbose
+# 32K runs, callers can export T2C_MAX_TOKENS=32768.
+os.environ.setdefault("T2C_MAX_TOKENS", "8192")
+# Cache mode: off (write nothing), read_write (default for first run),
+# read_only (for second run / cost-zero repeat).
+os.environ.setdefault("T2C_CACHE_MODE", "read_write")
+os.environ.setdefault("T2C_CACHE_DIR", ".t2c_cache")
 
 # Add project root to path
 project_root = Path(__file__).resolve().parent.parent

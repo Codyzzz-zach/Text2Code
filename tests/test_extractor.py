@@ -140,6 +140,9 @@ class TestBuildEntityMap:
 
 class TestExtractChapterMocked:
     def test_extract_chapter_calls_api(self):
+        # v3.4.2: MOCK_RESPONSE_JSON is verbose form, so opt into verbose-v1
+        # to exercise the legacy code path. New tests in TestCompactProtocol
+        # cover the default compact path.
         mock_client = MagicMock()
         mock_text_block = MagicMock(type="text", text=MOCK_RESPONSE_JSON)
         mock_message = MagicMock()
@@ -147,7 +150,7 @@ class TestExtractChapterMocked:
         mock_message.stop_reason = "end_turn"
         mock_client.messages.create.return_value = mock_message
 
-        extractor = LLMExtractor(_client=mock_client)
+        extractor = LLMExtractor(_client=mock_client, extractor_protocol="verbose-v1")
         segments = [
             _make_segment("hongloumeng_seg_0001", "甄士隐住在姑苏。"),
             _make_segment("hongloumeng_seg_0002", "他做了一个梦。"),
@@ -175,7 +178,7 @@ class TestExtractChapterMocked:
         mock_message.stop_reason = "end_turn"
         mock_client.messages.create.return_value = mock_message
 
-        extractor = LLMExtractor(_client=mock_client)
+        extractor = LLMExtractor(_client=mock_client, extractor_protocol="verbose-v1")
         segments = [_make_segment()]
         existing = {"甄士隐": "hongloumeng_ent_0001"}
         objects = extractor.extract_chapter(
@@ -316,15 +319,19 @@ class TestLazyImport:
 
 
 class TestMaxTokensConfig:
-    """v3.4.1: configurable max_tokens and thinking_budget."""
+    """v3.4.1: configurable max_tokens and thinking_budget.
+    v3.4.2: defaults lowered (max_tokens 32768→8192, thinking 2048→1024,
+    batch_chars 900→1200) to discourage long outputs and pair with the
+    compact protocol.
+    """
 
-    def test_default_max_tokens_is_32768(self):
+    def test_default_max_tokens_is_8192(self):
         ext = LLMExtractor(_client=MagicMock())
-        assert ext._max_tokens == 32768
+        assert ext._max_tokens == 8192
 
-    def test_default_thinking_budget_is_2048(self):
+    def test_default_thinking_budget_is_1024(self):
         ext = LLMExtractor(_client=MagicMock())
-        assert ext._thinking_budget == 2048
+        assert ext._thinking_budget == 1024
 
     def test_explicit_max_tokens_overrides_default(self):
         ext = LLMExtractor(_client=MagicMock(), max_tokens=8192)
@@ -349,11 +356,11 @@ class TestMaxTokensConfig:
         ext = LLMExtractor(_client=MagicMock(), max_tokens=4096)
         assert ext._max_tokens == 4096
 
-    def test_max_batch_chars_default_is_900(self):
-        # Imported lazily so the test also serves as a guard against accidental
-        # reverts to 1500.
+    def test_max_batch_chars_default_is_1200(self):
+        # v3.4.2: 900 → 1200 to match the new compact protocol (which
+        # produces less output per batch, so larger input is fine).
         from t2c.extractor import _MAX_BATCH_CHARS
-        assert _MAX_BATCH_CHARS == 900
+        assert _MAX_BATCH_CHARS == 1200
 
     def test_telemetry_fields_initialized(self):
         ext = LLMExtractor(_client=MagicMock())
@@ -361,6 +368,17 @@ class TestMaxTokensConfig:
         assert ext._total_input_tokens == 0
         assert ext._total_output_tokens == 0
         assert ext._api_elapsed_sec == 0.0
+
+    def test_default_protocol_is_compact(self):
+        # v3.4.2: default protocol switched from verbose-v1 to compact-v1.
+        ext = LLMExtractor(_client=MagicMock())
+        assert ext._protocol == "compact-v1"
+        assert ext._prompt_version == "compact-main-v1"
+
+    def test_verbose_protocol_explicit(self):
+        ext = LLMExtractor(_client=MagicMock(), extractor_protocol="verbose-v1")
+        assert ext._protocol == "verbose-v1"
+        assert ext._prompt_version == "verbose-main-v1"
 
 
 class TestPartialRecovery:
@@ -400,3 +418,205 @@ class TestPartialRecovery:
         rec = LLMExtractor(_client=MagicMock())._recover_partial_objects(text)
         assert len(rec) == 1
         assert rec[0]["data"]["name"] == "{nested}"
+
+
+# ---------------------------------------------------------------------------
+# v3.4.2: compact protocol + cache integration
+# ---------------------------------------------------------------------------
+
+
+_COMPACT_RESPONSE = """[
+  {"t":"E","lid":"e1","n":"甄士隐","k":"person","a":["士隐"],"sid":["hongloumeng_seg_0001"],"q":["甄士隐"]},
+  {"t":"E","lid":"e2","n":"姑苏","k":"location","sid":["hongloumeng_seg_0001"],"q":["姑苏"]},
+  {"t":"C","s":"e1","p":"lives_in","o":"e2","m":"asserted","pol":"positive","sid":["hongloumeng_seg_0001"],"q":["住"]},
+  {"t":"I","sid":"hongloumeng_seg_0002","r":"chapter title"}
+]"""
+
+
+class TestCompactProtocolEndToEnd:
+    def test_compact_response_expands_and_derives_relation(self):
+        mock_client = MagicMock()
+        mock_text_block = MagicMock(type="text", text=_COMPACT_RESPONSE)
+        mock_message = MagicMock()
+        mock_message.content = [mock_text_block]
+        mock_message.stop_reason = "end_turn"
+        mock_client.messages.create.return_value = mock_message
+
+        extractor = LLMExtractor(_client=mock_client)
+        segments = [
+            _make_segment("hongloumeng_seg_0001", "甄士隐住在姑苏。"),
+            _make_segment("hongloumeng_seg_0002", "第1回"),
+        ]
+        objects = extractor.extract_chapter(
+            doc_id="hongloumeng",
+            chapter_num=1,
+            chapter_title="第1回",
+            segments=segments,
+        )
+        # 2 Entity + 1 Claim + 1 IgnoreSegment + 1 derived Relation = 5
+        assert len(objects) == 5
+        types = {o["type"] for o in objects}
+        assert types == {"Entity", "Claim", "IgnoreSegment", "Relation"}
+        # LLM was called once
+        mock_client.messages.create.assert_called_once()
+        # The compact prompt is what was sent (not verbose). The compact
+        # prompt forbids Relation and EvidenceRef explicitly, so we look
+        # for those markers rather than English strings.
+        prompt = mock_client.messages.create.call_args.kwargs["messages"][0]["content"]
+        assert "严禁输出" in prompt
+        assert "R (Relation)" in prompt
+        assert "EvidenceRef 字段" in prompt
+
+    def test_compact_does_not_pass_relation_through(self):
+        # Even if the LLM emits R in the response, the compact path ignores
+        # it (Relation is derived, not emitted).
+        bad_response = """[
+          {"t":"R","id":"foo","subject":"e1","predicate":"x","object":"e2","claim_id":"c1"},
+          {"t":"E","lid":"e1","n":"A","k":"person","sid":["s1"]},
+          {"t":"E","lid":"e2","n":"B","k":"person","sid":["s1"]},
+          {"t":"C","s":"e1","p":"x","o":"e2","m":"asserted","pol":"positive","sid":["s1"]}
+        ]"""
+        mock_client = MagicMock()
+        mock_text_block = MagicMock(type="text", text=bad_response)
+        mock_message = MagicMock()
+        mock_message.content = [mock_text_block]
+        mock_message.stop_reason = "end_turn"
+        mock_client.messages.create.return_value = mock_message
+
+        extractor = LLMExtractor(_client=mock_client)
+        segments = [_make_segment("s1", "A and B")]
+        objects = extractor.extract_chapter(
+            doc_id="d", chapter_num=1, chapter_title="t", segments=segments,
+        )
+        # No raw R from the LLM; the program-derived R is the only Relation.
+        rels = [o for o in objects if o["type"] == "Relation"]
+        assert len(rels) == 1
+        assert rels[0]["data"]["claim_id"].startswith("d_clm_")
+
+
+class TestLLMCacheIntegration:
+    def test_cache_hit_does_not_call_llm_client(self, tmp_path):
+        mock_client = MagicMock()
+        mock_text_block = MagicMock(type="text", text=_COMPACT_RESPONSE)
+        mock_message = MagicMock()
+        mock_message.content = [mock_text_block]
+        mock_message.stop_reason = "end_turn"
+        mock_client.messages.create.return_value = mock_message
+
+        # First run with read_write to populate the cache
+        ext1 = LLMExtractor(
+            _client=mock_client,
+            cache_mode="read_write",
+            cache_dir=tmp_path,
+        )
+        segments = [
+            _make_segment("hongloumeng_seg_0001", "甄士隐住在姑苏。"),
+            _make_segment("hongloumeng_seg_0002", "第1回"),
+        ]
+        ext1.extract_chapter(
+            doc_id="hongloumeng", chapter_num=1,
+            chapter_title="第1回", segments=segments,
+        )
+        assert mock_client.messages.create.call_count == 1
+        assert ext1._cache_hits == 0
+        assert ext1._cache_misses == 1
+
+        # Second run with a fresh client — cache hit should bypass the LLM.
+        mock_client2 = MagicMock()  # would raise if called
+        ext2 = LLMExtractor(
+            _client=mock_client2,
+            cache_mode="read_only",
+            cache_dir=tmp_path,
+        )
+        objects = ext2.extract_chapter(
+            doc_id="hongloumeng", chapter_num=1,
+            chapter_title="第1回", segments=segments,
+        )
+        assert mock_client2.messages.create.call_count == 0
+        assert ext2._cache_hits == 1
+        assert ext2._cache_misses == 0
+        assert len(objects) == 5
+
+    def test_read_only_misses_raise(self, tmp_path):
+        mock_client = MagicMock()
+        mock_text_block = MagicMock(type="text", text=_COMPACT_RESPONSE)
+        mock_message = MagicMock()
+        mock_message.content = [mock_text_block]
+        mock_message.stop_reason = "end_turn"
+        mock_client.messages.create.return_value = mock_message
+
+        ext = LLMExtractor(
+            _client=mock_client,
+            cache_mode="read_only",
+            cache_dir=tmp_path,
+        )
+        with pytest.raises(FileNotFoundError, match="Cache miss"):
+            ext.extract_chapter(
+                doc_id="d", chapter_num=1, chapter_title="t",
+                segments=[_make_segment("s1", "x")],
+            )
+        # LLM must NOT have been called
+        mock_client.messages.create.assert_not_called()
+
+    def test_off_mode_never_reads_or_writes_cache(self, tmp_path):
+        mock_client = MagicMock()
+        mock_text_block = MagicMock(type="text", text=_COMPACT_RESPONSE)
+        mock_message = MagicMock()
+        mock_message.content = [mock_text_block]
+        mock_message.stop_reason = "end_turn"
+        mock_client.messages.create.return_value = mock_message
+
+        ext = LLMExtractor(_client=mock_client, cache_mode="off", cache_dir=tmp_path)
+        segments = [
+            _make_segment("hongloumeng_seg_0001", "甄士隐住在姑苏。"),
+        ]
+        ext.extract_chapter(
+            doc_id="hongloumeng", chapter_num=1,
+            chapter_title="第1回", segments=segments,
+        )
+        # No cache lookups in OFF mode
+        assert ext._cache is None
+
+    def test_refresh_mode_overwrites_existing_cache(self, tmp_path):
+        mock_client = MagicMock()
+        mock_text_block = MagicMock(type="text", text=_COMPACT_RESPONSE)
+        mock_message = MagicMock()
+        mock_message.content = [mock_text_block]
+        mock_message.stop_reason = "end_turn"
+        mock_client.messages.create.return_value = mock_message
+
+        # First run: read_write
+        ext1 = LLMExtractor(
+            _client=mock_client, cache_mode="read_write", cache_dir=tmp_path,
+        )
+        ext1.extract_chapter(
+            doc_id="d", chapter_num=1, chapter_title="t",
+            segments=[_make_segment("s1", "x")],
+        )
+        # Second run: refresh should call LLM again, not serve from cache
+        ext2 = LLMExtractor(
+            _client=mock_client, cache_mode="refresh", cache_dir=tmp_path,
+        )
+        ext2.extract_chapter(
+            doc_id="d", chapter_num=1, chapter_title="t",
+            segments=[_make_segment("s1", "x")],
+        )
+        # Two LLM calls total (1 from first, 1 from refresh)
+        assert mock_client.messages.create.call_count == 2
+        # In refresh, no hit was recorded (it bypasses the lookup)
+        assert ext2._cache_hits == 0
+
+
+class TestExtractorTelemetryV342:
+    """v3.4.2: cache telemetry fields are exposed."""
+
+    def test_cache_counters_init_zero(self):
+        ext = LLMExtractor(_client=MagicMock())
+        assert ext._cache_hits == 0
+        assert ext._cache_misses == 0
+        assert ext._cache_lookups == 0
+
+    def test_seed_entity_map(self):
+        ext = LLMExtractor(_client=MagicMock())
+        ext._seed_entity_map({"甄士隐": "d_ent_9999"})
+        assert ext._seed_entities == {"甄士隐": "d_ent_9999"}

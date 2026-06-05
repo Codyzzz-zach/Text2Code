@@ -1,96 +1,54 @@
 T2C 前三回提取质量报告
 ============================================================
 
-[grounding] hongloumeng_ent_0001: Entity name '女娲氏' not found in source segments
-[grounding] hongloumeng_ent_0001: Entity alias '娲皇氏' (of '女娲氏') not found in source segments
-[grounding] hongloumeng_ent_0002: Entity alias '弟子' (of '顽石') not found in source segments
-[grounding] hongloumeng_ent_0003: Entity name '大荒山无稽崖' not found in source segments
-[grounding] hongloumeng_ent_0005: Entity alias '大师' (of '僧') not found in source segments
+[grounding] hongloumeng_ent_0001: Entity name '甄士隐' not found in source segments
+[grounding] hongloumeng_ent_0002: Entity name '贾雨村' not found in source segments
+[grounding] hongloumeng_ent_0003: Entity name '女娲氏' not found in source segments
+[grounding] hongloumeng_ent_0004: Entity name '石头' not found in source segments
+[grounding] hongloumeng_ent_0005: Entity alias '茫茫大士' (of '僧') not found in source segments
 [grounding] hongloumeng_ent_0005: Entity alias '二仙师' (of '僧') not found in source segments
-[grounding] hongloumeng_ent_0006: Entity name '道人' not found in source segments
-[grounding] hongloumeng_ent_0006: Entity alias '那道' (of '道人') not found in source segments
+[grounding] hongloumeng_ent_0006: Entity alias '渺渺真人' (of '道人') not found in source segments
 [grounding] hongloumeng_ent_0006: Entity alias '二仙师' (of '道人') not found in source segments
-[grounding] hongloumeng_ent_0007: Entity name '红尘中荣华富贵处' not found in source segments
-[grounding] hongloumeng_ent_0007: Entity alias '红尘' (of '红尘中荣华富贵处') not found in source segments
-[grounding] hongloumeng_ent_0007: Entity alias '富贵场中' (of '红尘中荣华富贵处') not found in source segments
-[grounding] hongloumeng_ent_0007: Entity alias '温柔乡里' (of '红尘中荣华富贵处') not found in source segments
-[grounding] hongloumeng_ent_0007: Entity alias '昌明隆盛之邦' (of '红尘中荣华富贵处') not found in source segments
-[grounding] hongloumeng_ent_0007: Entity alias '诗礼簪缨之族' (of '红尘中荣华富贵处') not found in source segments
-[grounding] hongloumeng_ent_0007: Entity alias '花柳繁华地' (of '红尘中荣华富贵处') not found in source segments
-[grounding] hongloumeng_ent_0007: Entity alias '温柔富贵乡' (of '红尘中荣华富贵处') not found in source segments
-[grounding] hongloumeng_ent_0008: Entity alias '空空道人' (of '道人') not found in source segments
-[grounding] hongloumeng_ent_0008: Entity alias '茫茫大士' (of '道人') not found in source segments
-[grounding] hongloumeng_ent_0008: Entity alias '渺渺真人' (of '道人') not found in source segments
-[grounding] hongloumeng_ent_0009: Entity name '班姑' not found in source segments
-[grounding] hongloumeng_ent_0010: Entity name '蔡女' not found in source segments
-[grounding] hongloumeng_ent_0011: Entity name '石上故事' not found in source segments
-[grounding] hongloumeng_ent_0011: Entity alias '石上字迹' (of '石上故事') not found in source segments
-[grounding] hongloumeng_ent_0012: Entity name '潘安' not found in source segments
-[grounding] hongloumeng_ent_0013: Entity name '子建' not found in source segments
-[grounding] hongloumeng_ent_0014: Entity name '西子' not found in source segments
-[grounding] hongloumeng_ent_0015: Entity name '文君' not found in source segments
-[grounding] hongloumeng_ent_0016: Entity name '红娘' not found in source segments
-[grounding] hongloumeng_ent_0017: Entity name '小玉' not found in source segments
-[grounding] hongloumeng_ent_0018: Entity name '情僧' not found in source segments
-[grounding] hongloumeng_ent_0019: Entity name '玉峰' not found in source segments
-[grounding] hongloumeng_ent_0020: Entity name '孔梅溪' not found in source segments
-[grounding] hongloumeng_ent_0021: Entity name '脂砚斋' not found in source segments
-[grounding] hongloumeng_ent_0023: Entity name '《情僧录》' not found in source segments
-[grounding] hongloumeng_ent_0024: Entity name '《红楼梦》' not found in source segments
-[grounding] hongloumeng_ent_0025: Entity name '《风月宝鉴》' not found in source segments
-[grounding] hongloumeng_ent_0026: Entity name '野史' not found in source segments
-[grounding] hongloumeng_ent_0027: Entity name '风月笔墨' not found in source segments
-[grounding] hongloumeng_ent_0028: Entity name '佳人才子书' not found in source segments
-[grounding] hongloumeng_ent_0028: Entity alias '佳人才子等书' (of '佳人才子书') not found in source segments
-[grounding] hongloumeng_ent_0029: Entity name '姑苏' not found in source segments
-[grounding] hongloumeng_ent_0030: Entity name '阊门' not found in source segments
-[grounding] hongloumeng_ent_0031: Entity name '十里街' not found in source segments
-[grounding] hongloumeng_ent_0032: Entity name '仁清巷' not found in source segments
-[grounding] hongloumeng_ent_0033: Entity name '葫芦庙' not found in source segments
-[grounding] hongloumeng_ent_0035: Entity name '封氏' not found in source segments
-[grounding] hongloumeng_ent_0036: Entity name '英莲' not found in source segments
-[grounding] hongloumeng_ent_0037: Entity name '西方灵河岸' not found in source segments
-[grounding] hongloumeng_ent_0038: Entity name '三生石' not found in source segments
-[grounding] hongloumeng_ent_0038: Entity alias '三生石畔' (of '三生石') not found in source segments
-[grounding] hongloumeng_ent_0039: Entity name '绛珠草' not found in source segments
-[grounding] hongloumeng_ent_0040: Entity name '赤瑕宫' not found in source segments
-[grounding] hongloumeng_ent_0041: Entity name '神瑛侍者' not found in source segments
-[grounding] hongloumeng_ent_0041: Entity alias '神瑛' (of '神瑛侍者') not found in source segments
-[grounding] hongloumeng_ent_0042: Entity name '离恨天' not found in source segments
-[grounding] hongloumeng_ent_0043: Entity name '蜜青果' not found in source segments
-[grounding] hongloumeng_ent_0044: Entity name '灌愁海水' not found in source segments
-[grounding] hongloumeng_ent_0045: Entity name '警幻仙子' not found in source segments
-[grounding] hongloumeng_ent_0046: Entity name '绛珠仙子' not found in source segments
-[grounding] hongloumeng_ent_0047: Entity name '风流公案' not found in source segments
-[grounding] hongloumeng_ent_0029: Entity name '贾雨村' not found in source segments
-[grounding] hongloumeng_ent_0029: Entity alias '时飞' (of '贾雨村') not found in source segments
-[grounding] hongloumeng_ent_0029: Entity alias '雨村' (of '贾雨村') not found in source segments
-[grounding] hongloumeng_ent_0029: Entity alias '雨村者' (of '贾雨村') not found in source segments
-[grounding] hongloumeng_ent_0030: Entity name '北邙山' not found in source segments
-[grounding] hongloumeng_ent_0031: Entity name '太虚幻境' not found in source segments
-[grounding] hongloumeng_ent_0032: Entity name '奶母' not found in source segments
-[grounding] hongloumeng_ent_0033: Entity name '顽石' not found in source segments
-[grounding] hongloumeng_ent_0033: Entity alias '弟子' (of '顽石') not found in source segments
-[grounding] hongloumeng_ent_0033: Entity alias '蠢物' (of '顽石') not found in source segments
-[grounding] hongloumeng_ent_0033: Entity alias '通灵宝玉' (of '顽石') not found in source segments
-[grounding] hongloumeng_ent_0034: Entity name '风流孽鬼' not found in source segments
-[grounding] hongloumeng_ent_0035: Entity name '胡州' not found in source segments
-[grounding] hongloumeng_ent_0036: Entity name '严老爷' not found in source segments
-[grounding] hongloumeng_ent_0037: Entity name '甄家丫鬟' not found in source segments
-[grounding] hongloumeng_ent_0037: Entity alias '丫鬟' (of '甄家丫鬟') not found in source segments
-[grounding] hongloumeng_ent_0037: Entity alias '甄家之婢' (of '甄家丫鬟') not found in source segments
-[grounding] hongloumeng_ent_0038: Entity name '书房' not found in source segments
-[grounding] hongloumeng_ent_0038: Entity alias '小斋' (of '书房') not found in source segments
-[grounding] hongloumeng_ent_0039: Entity name '前厅' not found in source segments
-[grounding] hongloumeng_ent_0040: Entity name '雨村中秋诗' not found in source segments
-[grounding] hongloumeng_ent_0041: Entity name '雨村吟联' not found in source segments
-[grounding] hongloumeng_ent_0042: Entity name '封肃' not found in source segments
-[grounding] hongloumeng_ent_0043: Entity name '跛足道人' not found in source segments
-[grounding] hongloumeng_ent_0043: Entity alias '那道人' (of '跛足道人') not found in source segments
-[grounding] hongloumeng_ent_0044: Entity name '大如州' not found in source segments
-[grounding] hongloumeng_ent_0045: Entity name '《好了歌》' not found in source segments
-[grounding] hongloumeng_ent_0045: Entity alias '好了歌' (of '《好了歌》') not found in source segments
-[grounding] hongloumeng_ent_0046: Entity name '褡裢' not found in source segments
+[grounding] hongloumeng_ent_0007: Entity name '美玉' not found in source segments
+[grounding] hongloumeng_ent_0008: Entity name '空空道人' not found in source segments
+[grounding] hongloumeng_ent_0009: Entity name '大荒山' not found in source segments
+[grounding] hongloumeng_ent_0010: Entity name '无稽崖' not found in source segments
+[grounding] hongloumeng_ent_0011: Entity name '青埂峰' not found in source segments
+[grounding] hongloumeng_ent_0001: Entity name '封氏' not found in source segments
+[grounding] hongloumeng_ent_0002: Entity name '玉峰' not found in source segments
+[grounding] hongloumeng_ent_0003: Entity name '孔梅溪' not found in source segments
+[grounding] hongloumeng_ent_0003: Entity alias '东鲁孔梅溪' (of '孔梅溪') not found in source segments
+[grounding] hongloumeng_ent_0004: Entity name '脂砚斋' not found in source segments
+[grounding] hongloumeng_ent_0005: Entity name '姑苏' not found in source segments
+[grounding] hongloumeng_ent_0006: Entity name '阊门' not found in source segments
+[grounding] hongloumeng_ent_0007: Entity name '十里街' not found in source segments
+[grounding] hongloumeng_ent_0008: Entity name '仁清巷' not found in source segments
+[grounding] hongloumeng_ent_0009: Entity name '葫芦庙' not found in source segments
+[grounding] hongloumeng_ent_0010: Entity name '《石头记》' not found in source segments
+[grounding] hongloumeng_ent_0011: Entity name '《情僧录》' not found in source segments
+[grounding] hongloumeng_ent_0012: Entity name '《红楼梦》' not found in source segments
+[grounding] hongloumeng_ent_0013: Entity name '《风月宝鉴》' not found in source segments
+[grounding] hongloumeng_ent_0001: Entity name '英莲' not found in source segments
+[grounding] hongloumeng_ent_0002: Entity name '警幻仙子' not found in source segments
+[grounding] hongloumeng_ent_0003: Entity name '绛珠仙子' not found in source segments
+[grounding] hongloumeng_ent_0003: Entity alias '绛珠草' (of '绛珠仙子') not found in source segments
+[grounding] hongloumeng_ent_0004: Entity name '神瑛侍者' not found in source segments
+[grounding] hongloumeng_ent_0005: Entity name '太虚幻境' not found in source segments
+[grounding] hongloumeng_ent_0006: Entity name '灵河' not found in source segments
+[grounding] hongloumeng_ent_0007: Entity name '三生石' not found in source segments
+[grounding] hongloumeng_ent_0001: Entity name '奶母' not found in source segments
+[grounding] hongloumeng_ent_0002: Entity name '严老爷' not found in source segments
+[grounding] hongloumeng_ent_0003: Entity name '甄家丫鬟' not found in source segments
+[grounding] hongloumeng_ent_0003: Entity alias '丫鬟' (of '甄家丫鬟') not found in source segments
+[grounding] hongloumeng_ent_0004: Entity name '胡州' not found in source segments
+[grounding] hongloumeng_ent_0005: Entity name '北邙山' not found in source segments
+[grounding] hongloumeng_ent_0002: Entity name '神都' not found in source segments
+[grounding] hongloumeng_ent_0002: Entity alias '神京' (of '神都') not found in source segments
+[grounding] hongloumeng_ent_0002: Entity name '大如州' not found in source segments
+[grounding] hongloumeng_ent_0004: Entity name '好了歌' not found in source segments
+[grounding] hongloumeng_ent_0005: Entity name '甄家大丫鬟' not found in source segments
+[grounding] hongloumeng_ent_0001: Entity name '太爷' not found in source segments
+[grounding] hongloumeng_ent_0001: Entity alias '本府太爷' (of '太爷') not found in source segments
 [grounding] hongloumeng_ent_0076: Entity name '贾化' not found in source segments
 [grounding] hongloumeng_ent_0081: Entity name '林黛玉' not found in source segments
 [grounding] hongloumeng_ent_0085: Entity name '智通寺' not found in source segments
@@ -108,19 +66,59 @@ T2C 前三回提取质量报告
 [grounding] hongloumeng_ent_0135: Entity name '王熙凤' not found in source segments
 [ref] hongloumeng_evt_0062: Event '公差传唤封肃' references non-existent entity 'hongloumeng_ent_0061'
 [ref] hongloumeng_evt_0062: Event '公差传唤封肃' references non-existent entity 'hongloumeng_ent_0073'
+[ref] hongloumeng_evt_0063: Event '贾雨村送银缎答谢并要娇杏作二房' references non-existent entity 'hongloumeng_ent_0037'
 [ref] hongloumeng_evt_0063: Event '贾雨村送银缎答谢并要娇杏作二房' references non-existent entity 'hongloumeng_ent_0061'
+[ref] hongloumeng_evt_0064: Event '娇杏被扶作正室夫人' references non-existent entity 'hongloumeng_ent_0037'
+[ref] hongloumeng_evt_0065: Event '贾雨村中进士升知府' references non-existent entity 'hongloumeng_ent_0037'
+[ref] hongloumeng_evt_0066: Event '贾雨村被参革职' references non-existent entity 'hongloumeng_ent_0037'
+[ref] hongloumeng_evt_0067: Event '贾雨村谋入林府作西宾' references non-existent entity 'hongloumeng_ent_0037'
+[ref] hongloumeng_evt_0070: Event '雨村闲步至郭外' references non-existent entity 'hongloumeng_ent_0037'
+[ref] hongloumeng_evt_0071: Event '雨村偶遇冷子兴' references non-existent entity 'hongloumeng_ent_0037'
+[ref] hongloumeng_evt_0072: Event '冷子兴演说荣国府' references non-existent entity 'hongloumeng_ent_0037'
+[ref] hongloumeng_evt_0081: Event '雨村游历各省遇异样孩子' references non-existent entity 'hongloumeng_ent_0037'
+[ref] hongloumeng_evt_0082: Event '雨村在甄府处馆' references non-existent entity 'hongloumeng_ent_0037'
+[ref] hongloumeng_evt_0087: Event '雨村辞馆' references non-existent entity 'hongloumeng_ent_0037'
+[ref] hongloumeng_evt_0088: Event '雨村坐馆林家' references non-existent entity 'hongloumeng_ent_0037'
+[ref] hongloumeng_evt_0093: Event '雨村子兴饮酒闲谈' references non-existent entity 'hongloumeng_ent_0037'
+[ref] hongloumeng_evt_0094: Event '二人起身算还酒帐' references non-existent entity 'hongloumeng_ent_0037'
 [ref] hongloumeng_clm_0048: Claim subject 'hongloumeng_ent_0061' not in known entities
 [ref] hongloumeng_clm_0049: Claim subject 'hongloumeng_ent_0061' not in known entities
+[ref] hongloumeng_clm_0049: Claim object 'hongloumeng_ent_0020' not in known entities
+[ref] hongloumeng_clm_0050: Claim subject 'hongloumeng_ent_0020' not in known entities
+[ref] hongloumeng_clm_0051: Claim object 'hongloumeng_ent_0020' not in known entities
+[ref] hongloumeng_clm_0052: Claim subject 'hongloumeng_ent_0023' not in known entities
+[ref] hongloumeng_clm_0054: Claim object 'hongloumeng_ent_0037' not in known entities
+[ref] hongloumeng_clm_0056: Claim subject 'hongloumeng_ent_0037' not in known entities
+[ref] hongloumeng_clm_0057: Claim subject 'hongloumeng_ent_0037' not in known entities
+[ref] hongloumeng_clm_0058: Claim object 'hongloumeng_ent_0015' not in known entities
+[ref] hongloumeng_clm_0064: Claim object 'hongloumeng_ent_0037' not in known entities
+[ref] hongloumeng_clm_0066: Claim subject 'hongloumeng_ent_0037' not in known entities
+[ref] hongloumeng_clm_0067: Claim object 'hongloumeng_ent_0037' not in known entities
+[ref] hongloumeng_clm_0068: Claim subject 'hongloumeng_ent_0037' not in known entities
 [ref] hongloumeng_clm_0093: Claim object '女儿是水作的骨肉，男人是泥作的骨肉' not in known entities
+[ref] hongloumeng_clm_0094: Claim subject 'hongloumeng_ent_0037' not in known entities
 [ref] hongloumeng_clm_0098: Claim object '富而好礼之家' not in known entities
+[ref] hongloumeng_clm_0099: Claim object 'hongloumeng_ent_0039' not in known entities
+[ref] hongloumeng_clm_0103: Claim subject 'hongloumeng_ent_0037' not in known entities
+[ref] hongloumeng_clm_0104: Claim subject 'hongloumeng_ent_0037' not in known entities
 [ref] hongloumeng_rel_0038: Relation subject 'hongloumeng_ent_0061' not in known entities
+[ref] hongloumeng_rel_0038: Relation object 'hongloumeng_ent_0020' not in known entities
+[ref] hongloumeng_rel_0039: Relation object 'hongloumeng_ent_0020' not in known entities
+[ref] hongloumeng_rel_0040: Relation object 'hongloumeng_ent_0015' not in known entities
+[ref] hongloumeng_rel_0042: Relation object 'hongloumeng_ent_0037' not in known entities
 [grounding] hongloumeng_ent_0157: Entity name '贾迎春' not found in source segments
 [grounding] hongloumeng_ent_0158: Entity name '贾探春' not found in source segments
 [grounding] hongloumeng_ent_0159: Entity name '贾惜春' not found in source segments
 [grounding] hongloumeng_ent_0184: Entity name '贾赦院' not found in source segments
 [grounding] hongloumeng_ent_0190: Entity name '东边三间耳房' not found in source segments
 [grounding] hongloumeng_ent_0210: Entity name '半旧的青缎靠背引枕' not found in source segments
-[entity] hongloumeng_ent_0037: Entity '丫鬟' has different IDs across chapters: Ch1=hongloumeng_ent_0037, Ch2=hongloumeng_ent_0075
+[ref] hongloumeng_evt_0095: Event '张如圭遇贾雨村道喜' references non-existent entity 'hongloumeng_ent_0037'
+[ref] hongloumeng_evt_0096: Event '冷子兴献计令雨村央烦林如海' references non-existent entity 'hongloumeng_ent_0037'
+[ref] hongloumeng_evt_0097: Event '雨村面谋林如海' references non-existent entity 'hongloumeng_ent_0037'
+[ref] hongloumeng_evt_0099: Event '贾政请入相会雨村并协助谋职' references non-existent entity 'hongloumeng_ent_0037'
+[ref] hongloumeng_evt_0100: Event '雨村谋补金陵应天府缺上任' references non-existent entity 'hongloumeng_ent_0037'
+[entity] hongloumeng_ent_0003: Entity '丫鬟' has different IDs across chapters: Ch1=hongloumeng_ent_0003, Ch2=hongloumeng_ent_0075
+[entity] hongloumeng_ent_0001: Entity '太爷' has different IDs across chapters: Ch1=hongloumeng_ent_0001, Ch2=hongloumeng_ent_0076
 [entity] hongloumeng_ent_0092: Entity '金陵' has different IDs across chapters: Ch2=hongloumeng_ent_0092, Ch3=hongloumeng_ent_0265
 [entity] hongloumeng_ent_0103: Entity '贾赦' has different IDs across chapters: Ch2=hongloumeng_ent_0103, Ch3=hongloumeng_ent_0172
 [entity] hongloumeng_ent_0112: Entity '玉' has different IDs across chapters: Ch2=hongloumeng_ent_0112, Ch3=hongloumeng_ent_0260

@@ -8,7 +8,8 @@ from pydantic import BaseModel
 
 class EvidenceRef(BaseModel):
     """Evidence reference — nested inside semantic objects' evidence_refs lists."""
-    segment_id: str
+    segment_id: str | None = None
+    segment_symbol: str | None = None
     start: int
     end: int
     quote_hash: str
@@ -63,6 +64,8 @@ class Event(BaseModel):
     location: str | None = None
     evidence_refs: list[EvidenceRef] = []
     source_segment_ids: list[str] = []
+    # v3.3: symbol reference fields for codegraph-native code
+    participant_symbols: list[str] = []
 
 
 class Claim(BaseModel):
@@ -80,6 +83,9 @@ class Claim(BaseModel):
     derived_from: list[str] = []
     evidence_refs: list[EvidenceRef] = []
     source_segment_ids: list[str] = []
+    # v3.3: symbol reference fields for codegraph-native code
+    subject_symbol: str | None = None
+    object_symbol: str | None = None
 
 
 class Relation(BaseModel):
@@ -89,6 +95,10 @@ class Relation(BaseModel):
     object: str
     claim_id: str
     evidence_refs: list[EvidenceRef] = []
+    # v3.3: symbol reference fields for codegraph-native code
+    subject_symbol: str | None = None
+    object_symbol: str | None = None
+    claim_symbol: str | None = None
 
 
 class Residual(BaseModel):

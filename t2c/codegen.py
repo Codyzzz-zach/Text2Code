@@ -15,17 +15,19 @@ from t2c.ontology import (
 
 # Field order for deterministic output per type
 FIELD_ORDER: dict[str, list[str]] = {
-    "EvidenceRef": ["segment_id", "start", "end", "quote_hash"],
+    "EvidenceRef": ["segment_id", "segment_symbol", "start", "end", "quote_hash"],
     "Document": ["id", "source_path", "raw_text_hash", "total_length", "block_count", "created_at"],
     "Block": ["id", "doc_id", "index", "block_type", "start_offset", "end_offset", "text_slice", "hash"],
     "Segment": ["id", "doc_id", "block_index", "segment_type", "start_offset", "end_offset",
                 "text_slice", "hash"],
     "Entity": ["id", "name", "kind", "aliases", "evidence_refs", "source_segment_ids"],
-    "Event": ["id", "name", "kind", "participants", "time", "location",
+    "Event": ["id", "name", "kind", "participants", "participant_symbols", "time", "location",
               "evidence_refs", "source_segment_ids"],
-    "Claim": ["id", "subject", "predicate", "object", "modality", "polarity", "confidence",
+    "Claim": ["id", "subject", "subject_symbol", "predicate", "object", "object_symbol",
+              "modality", "polarity", "confidence",
               "source", "derived_from", "evidence_refs", "source_segment_ids"],
-    "Relation": ["id", "subject", "predicate", "object", "claim_id", "evidence_refs"],
+    "Relation": ["id", "subject", "subject_symbol", "predicate", "object", "object_symbol",
+                 "claim_id", "claim_symbol", "evidence_refs"],
     "Residual": ["id", "segment_id", "category", "importance", "reason", "evidence_refs"],
     "IgnoreSegment": ["id", "segment_id", "reason", "evidence_refs"],
     "CoverageReport": ["id", "doc_id", "total_segments", "status_counts", "requires_raw_fallback", "generated_at"],
@@ -123,6 +125,512 @@ class CodeGenerator:
 
         inner = ",\n    ".join(kwargs)
         return f"{type_name}(\n    {inner}\n)"
+
+    # -- v3.3: codegraph-native assignment code generation ------------------
+
+    @staticmethod
+    def _symbol_hash(text: str, prefix: str) -> str:
+        """Generate a stable Python-safe symbol from arbitrary text.
+
+        Uses sha256 first 6 hex chars for Chinese/unstable names.
+        """
+        import hashlib
+        h = hashlib.sha256(text.encode("utf-8")).hexdigest()[:6]
+        return f"{prefix}_zh_{h}"
+
+    @staticmethod
+    def _normalize_name(name: str) -> str:
+        """Try to produce a Python-safe identifier from a name.
+        Falls back to hash if the name contains non-ASCII characters.
+        """
+        if name.isascii() and name.replace("_", "").isalnum():
+            return name.lower().replace(" ", "_").replace("-", "_")
+        # Non-ASCII — use hash-based fallback
+        return None
+
+    def _compute_symbol_names(
+        self,
+        objects: list[BaseModel],
+        seg_symbols: dict[str, str] | None = None,
+        ent_symbols: dict[str, str] | None = None,
+    ) -> dict[str, str]:
+        """Compute stable symbol names for a list of objects.
+
+        Returns {object_id: symbol_name}.
+        seg_symbols and ent_symbols are pre-computed mappings used for
+        residual/ignore symbol derivation.
+        """
+        symbols: dict[str, str] = {}
+        seg_map = seg_symbols or {}
+        ent_map = ent_symbols or {}
+        used: set[str] = set()
+
+        for i, obj in enumerate(objects):
+            type_name = obj.__class__.__name__
+            obj_id = getattr(obj, "id", None) or str(i)
+
+            if type_name == "Segment":
+                # seg_0000, seg_0001, ... — strictly sequential, not block_index
+                base = f"seg_{i:04d}"
+                name = base
+                suffix = 0
+                while name in used:
+                    suffix += 1
+                    name = f"{base}_{suffix}"
+                symbols[obj_id] = name
+                used.add(name)
+
+            elif type_name == "Entity":
+                ent_name = getattr(obj, "name", "")
+                norm = self._normalize_name(ent_name)
+                if norm:
+                    base = f"ent_{norm}"
+                else:
+                    base = self._symbol_hash(ent_name + obj_id, "ent")
+                name = base
+                suffix = 0
+                while name in used:
+                    suffix += 1
+                    name = f"{base}_{suffix}"
+                symbols[obj_id] = name
+                used.add(name)
+
+            elif type_name == "Claim":
+                subject = getattr(obj, "subject", "")
+                predicate = getattr(obj, "predicate", "")
+                obj_val = getattr(obj, "object", "") or ""
+                key = f"{subject}_{predicate}_{obj_val}"
+                norm = self._normalize_name(key)
+                # Use text-based name only if short enough (< 30 chars);
+                # otherwise fall back to stable hash for readability
+                if norm and len(norm) <= 30:
+                    base = f"claim_{norm}"
+                else:
+                    base = self._symbol_hash(key, "claim")
+                name = base
+                suffix = 0
+                while name in used:
+                    suffix += 1
+                    name = f"{base}_{suffix}"
+                symbols[obj_id] = name
+                used.add(name)
+
+            elif type_name == "Event":
+                evt_name = getattr(obj, "name", "")
+                norm = self._normalize_name(evt_name)
+                if norm:
+                    base = f"evt_{norm}"
+                else:
+                    base = self._symbol_hash(evt_name + obj_id, "evt")
+                name = base
+                suffix = 0
+                while name in used:
+                    suffix += 1
+                    name = f"{base}_{suffix}"
+                symbols[obj_id] = name
+                used.add(name)
+
+            elif type_name == "Residual":
+                seg_id = getattr(obj, "segment_id", "")
+                seg_sym = seg_map.get(seg_id, f"seg_{i:04d}")
+                base = f"res_{seg_sym}"
+                name = base
+                suffix = 0
+                while name in used:
+                    suffix += 1
+                    name = f"{base}_{suffix}"
+                symbols[obj_id] = name
+                used.add(name)
+
+            elif type_name == "IgnoreSegment":
+                seg_id = getattr(obj, "segment_id", "")
+                seg_sym = seg_map.get(seg_id, f"seg_{i:04d}")
+                base = f"ign_{seg_sym}"
+                name = base
+                suffix = 0
+                while name in used:
+                    suffix += 1
+                    name = f"{base}_{suffix}"
+                symbols[obj_id] = name
+                used.add(name)
+
+            elif type_name == "Document":
+                doc_id = getattr(obj, "id", "doc")
+                base = f"doc_{doc_id.replace('.', '_').replace('-', '_')}"
+                name = base
+                suffix = 0
+                while name in used:
+                    suffix += 1
+                    name = f"{base}_{suffix}"
+                symbols[obj_id] = name
+                used.add(name)
+
+            else:
+                # Block, Relation, CoverageReport — use type prefix + index
+                tn = type_name[:4].lower()
+                base = f"{tn}_{i:04d}"
+                name = base
+                suffix = 0
+                while name in used:
+                    suffix += 1
+                    name = f"{base}_{suffix}"
+                symbols[obj_id] = name
+                used.add(name)
+
+        return symbols
+
+    def generate_text_code_v33(
+        self,
+        doc: Document,
+        blocks: list[Block],
+        segments: list[Segment],
+    ) -> dict[str, str]:
+        """Generate v3.3 text code layer with assignment symbols.
+
+        Returns dict with single key 'text.py' mapping to code string.
+        Each Segment/Block/Document gets a Python symbol.
+        """
+        # Compute symbols
+        all_objects: list[BaseModel] = [doc] + list(blocks) + list(segments)
+        symbols = self._compute_symbol_names(all_objects)
+
+        # Build code
+        lines = [
+            f"# Auto-generated by t2c {self._version} — DO NOT EDIT",
+            "from t2c.ontology import Document, Block, Segment",
+            "",
+        ]
+
+        # Document
+        doc_sym = symbols.get(doc.id, "doc_0000")
+        lines.append(f"{doc_sym} = {self._format_object_v33(doc, symbols)}")
+        lines.append("")
+
+        # Blocks
+        for block in blocks:
+            blk_sym = symbols.get(block.id, f"blk_{block.index:04d}")
+            lines.append(f"{blk_sym} = {self._format_object_v33(block, symbols)}")
+            lines.append("")
+
+        # Segments
+        for seg in segments:
+            seg_sym = symbols.get(seg.id, f"seg_{len(lines):04d}")
+            lines.append(f"{seg_sym} = {self._format_object_v33(seg, symbols)}")
+            lines.append("")
+
+        return {"text.py": "\n".join(lines) + "\n"}
+
+    def generate_semantic_code_v33(
+        self,
+        objects: list[BaseModel],
+        external_symbols: dict[str, str] | None = None,
+        external_file: str | None = None,
+    ) -> dict[str, str]:
+        """Generate v3.3 semantic code with assignment + symbol refs.
+
+        Returns dict mapping filename → code string.
+        Objects are partitioned by type into separate files.
+
+        external_symbols: {object_id: symbol_name} for objects defined in
+            other files (e.g., segments from text.py).
+        external_file: the module name to import external symbols from
+            (e.g., '.text').
+        """
+        ext_syms = external_symbols or {}
+        ext_module = external_file or ".text"
+
+        # Partition objects by type
+        entities = [o for o in objects if o.__class__.__name__ == "Entity"]
+        claims = [o for o in objects if o.__class__.__name__ == "Claim"]
+        events = [o for o in objects if o.__class__.__name__ == "Event"]
+        residuals = [o for o in objects if o.__class__.__name__ == "Residual"]
+        ignores = [o for o in objects if o.__class__.__name__ == "IgnoreSegment"]
+        relations = [o for o in objects if o.__class__.__name__ == "Relation"]
+
+        # Compute symbols for each group
+        ent_symbols = self._compute_symbol_names(entities)
+        clm_symbols = self._compute_symbol_names(claims)
+        evt_symbols = self._compute_symbol_names(events)
+        res_symbols = self._compute_symbol_names(residuals, seg_symbols=ext_syms)
+        ign_symbols = self._compute_symbol_names(ignores, seg_symbols=ext_syms)
+        rel_symbols = self._compute_symbol_names(relations)
+
+        result: dict[str, str] = {}
+
+        # entities.py
+        if entities:
+            result["entities.py"] = self._generate_type_file_v33(
+                entities, ent_symbols, ["Entity", "EvidenceRef"],
+                external_symbols=ext_syms, external_module=ext_module,
+            )
+
+        # claims.py
+        if claims:
+            # Claims may reference entity symbols
+            all_ext = dict(ext_syms)
+            all_ext.update(ent_symbols)
+            result["claims.py"] = self._generate_type_file_v33(
+                claims, clm_symbols, ["Claim", "EvidenceRef"],
+                external_symbols=all_ext,
+                external_modules={ext_module, ".entities"},
+            )
+
+        # events.py
+        if events:
+            all_ext = dict(ext_syms)
+            all_ext.update(ent_symbols)
+            result["events.py"] = self._generate_type_file_v33(
+                events, evt_symbols, ["Event", "EvidenceRef"],
+                external_symbols=all_ext,
+                external_modules={ext_module, ".entities"},
+            )
+
+        # residuals.py
+        if residuals:
+            result["residuals.py"] = self._generate_type_file_v33(
+                residuals, res_symbols, ["Residual", "EvidenceRef"],
+                external_symbols=ext_syms, external_module=ext_module,
+            )
+
+        # derived.py (relations + ignores)
+        derived_objects: list[BaseModel] = list(relations) + list(ignores)
+        if derived_objects:
+            all_ext = dict(ext_syms)
+            all_ext.update(ent_symbols)
+            all_ext.update(clm_symbols)
+            result["derived.py"] = self._generate_type_file_v33(
+                derived_objects,
+                {**rel_symbols, **ign_symbols},
+                ["Relation", "IgnoreSegment", "EvidenceRef"],
+                external_symbols=all_ext,
+                external_modules={ext_module, ".entities", ".claims"},
+            )
+
+        return result
+
+    def generate_derived_code_v33(
+        self,
+        relations: list[BaseModel] | None = None,
+        ignores: list[BaseModel] | None = None,
+        external_symbols: dict[str, str] | None = None,
+    ) -> dict[str, str]:
+        """Generate v3.3 derived code (relations + ignore segments).
+
+        Returns dict with single key 'derived.py' or empty dict if no objects.
+        """
+        rels: list[BaseModel] = list(relations or [])
+        igns: list[BaseModel] = list(ignores or [])
+        derived_objects = rels + igns
+        if not derived_objects:
+            return {}
+
+        ext_syms = external_symbols or {}
+
+        rel_symbols = self._compute_symbol_names(rels)
+        ign_symbols = self._compute_symbol_names(igns, seg_symbols=ext_syms)
+
+        code = self._generate_type_file_v33(
+            derived_objects,
+            {**rel_symbols, **ign_symbols},
+            ["Relation", "IgnoreSegment", "EvidenceRef"],
+            external_symbols=ext_syms,
+            external_modules={".text", ".entities", ".claims"},
+        )
+        return {"derived.py": code}
+
+    def _generate_type_file_v33(
+        self,
+        objects: list[BaseModel],
+        symbols: dict[str, str],
+        type_names: list[str],
+        external_symbols: dict[str, str] | None = None,
+        external_module: str | None = None,
+        external_modules: set[str] | None = None,
+    ) -> str:
+        """Generate a single type file with assignment + symbol refs + imports."""
+        ext_syms = external_symbols or {}
+        modules = external_modules or ({external_module} if external_module else set())
+
+        # Build imports
+        lines = [
+            f"# Auto-generated by t2c {self._version} — DO NOT EDIT",
+            f"from t2c.ontology import {', '.join(type_names)}",
+        ]
+
+        # External symbol imports — group by module
+        mod_syms: dict[str, list[str]] = {}
+        for obj in objects:
+            # Check evidence_refs for segment symbol refs
+            erefs = getattr(obj, "evidence_refs", []) or []
+            for eref in erefs:
+                seg_id = getattr(eref, "segment_id", None)
+                if seg_id and seg_id in ext_syms:
+                    seg_sym = ext_syms[seg_id]
+                    mod_syms.setdefault(external_module or ".text", []).append(seg_sym)
+
+            # Check Claim subject/object for entity symbol refs
+            if obj.__class__.__name__ == "Claim":
+                subject = getattr(obj, "subject", None)
+                if subject and subject in ext_syms:
+                    mod_syms.setdefault(".entities", []).append(ext_syms[subject])
+                obj_val = getattr(obj, "object", None)
+                if obj_val and obj_val in ext_syms:
+                    mod_syms.setdefault(".entities", []).append(ext_syms[obj_val])
+
+            # Check Event participants for entity symbol refs
+            if obj.__class__.__name__ == "Event":
+                for pid in (getattr(obj, "participants", []) or []):
+                    if pid in ext_syms:
+                        mod_syms.setdefault(".entities", []).append(ext_syms[pid])
+
+            # Check Relation subject/object/claim for symbol refs
+            if obj.__class__.__name__ == "Relation":
+                for field, mod in [("subject", ".entities"), ("object", ".entities"), ("claim_id", ".claims")]:
+                    val = getattr(obj, field, None)
+                    if val and val in ext_syms:
+                        mod_syms.setdefault(mod, []).append(ext_syms[val])
+
+        for mod in sorted(mod_syms):
+            unique_syms = sorted(set(mod_syms[mod]))
+            if unique_syms:
+                lines.append(f"from {mod} import {', '.join(unique_syms)}")
+
+        lines.append("")
+
+        # Format each object as assignment
+        for obj in objects:
+            obj_id = getattr(obj, "id", None)
+            sym = symbols.get(obj_id, f"obj_{len(lines):04d}")
+            formatted = self._format_object_v33(obj, {**symbols, **ext_syms})
+            lines.append(f"{sym} = {formatted}")
+            lines.append("")
+
+        return "\n".join(lines) + "\n"
+
+    def _format_object_v33(
+        self,
+        obj: BaseModel,
+        all_symbols: dict[str, str],
+    ) -> str:
+        """Format a Pydantic object as a v3.3 constructor call with symbol refs.
+
+        When a field value is an ID that has a symbol mapping, emit the
+        symbol ref instead of the string ID. Keyword names use the
+        codegen keyword (e.g., 'segment' instead of 'segment_id').
+        """
+        type_name = obj.__class__.__name__
+        fields = FIELD_ORDER.get(type_name, list(obj.__class__.model_fields.keys()))
+
+        # Skip internal/symbol fields in output
+        SKIP_FIELDS = {
+            "subject_symbol", "object_symbol", "segment_symbol",
+            "participant_symbols", "claim_symbol",
+        }
+
+        kwargs: list[str] = []
+        for field_name in fields:
+            if field_name in SKIP_FIELDS:
+                continue
+
+            value = getattr(obj, field_name, None)
+            if value is None:
+                continue
+            if isinstance(value, list) and not value and field_name not in ("participants", "evidence_refs"):
+                continue
+
+            # Emit keyword name and formatted value
+            kw_name = self._v33_keyword_name(type_name, field_name)
+            use_symbol = self._is_symbol_ref_field(type_name, field_name)
+            formatted = self._format_value_v33(value, all_symbols, type_name, field_name, use_symbol)
+            kwargs.append(f"{kw_name}={formatted}")
+
+        if not kwargs:
+            return f"{type_name}()"
+
+        if len(kwargs) <= 4:
+            return f"{type_name}({', '.join(kwargs)})"
+
+        inner = ",\n    ".join(kwargs)
+        return f"{type_name}(\n    {inner}\n)"
+
+    # Fields that should be emitted as symbol refs (not string literals)
+    _SYMBOL_REF_FIELDS: dict[str, set[str]] = {
+        "EvidenceRef": {"segment_id"},
+        "Claim": {"subject", "object"},
+        "Event": {"participants"},
+        "Relation": {"subject", "object", "claim_id"},
+        "Residual": {"segment_id"},
+        "IgnoreSegment": {"segment_id"},
+    }
+
+    @staticmethod
+    def _v33_keyword_name(type_name: str, field_name: str) -> str:
+        """Map ontology field name to v3.3 codegen keyword name.
+
+        For symbol-ref-capable fields, emit shorter keyword names that
+        match what codegraph tools see as symbol names.
+        """
+        # EvidenceRef.segment_id → segment (for symbol ref compat)
+        if type_name == "EvidenceRef" and field_name == "segment_id":
+            return "segment"
+        # Relation.claim_id → claim (for symbol ref compat)
+        if type_name == "Relation" and field_name == "claim_id":
+            return "claim"
+        return field_name
+
+    @classmethod
+    def _is_symbol_ref_field(cls, type_name: str, field_name: str) -> bool:
+        """Check if a field should be emitted as a symbol ref."""
+        return field_name in cls._SYMBOL_REF_FIELDS.get(type_name, set())
+
+    def _format_value_v33(
+        self,
+        value: Any,
+        all_symbols: dict[str, str],
+        parent_type: str = "",
+        field_name: str = "",
+        use_symbol: bool = False,
+    ) -> str:
+        """Format a value for v3.3 code, using symbol refs when available.
+
+        Only substitutes symbol refs for fields marked as symbol-ref-capable
+        (e.g., segment_id, subject, object, participants, claim_id).
+        """
+        if isinstance(value, str):
+            # Only substitute symbol ref for specific reference fields
+            if use_symbol and value in all_symbols:
+                return all_symbols[value]
+            return repr(value)
+        if isinstance(value, bool):
+            return "True" if value else "False"
+        if isinstance(value, int):
+            return str(value)
+        if isinstance(value, float):
+            return str(value)
+        if value is None:
+            return "None"
+        if isinstance(value, BaseModel):
+            return self._format_object_v33(value, all_symbols)
+        if isinstance(value, list):
+            if not value:
+                return "[]"
+            if all(isinstance(v, BaseModel) for v in value):
+                items = [self._format_object_v33(v, all_symbols) for v in value]
+                if len(items) == 1:
+                    return f"[{items[0]}]"
+                inner = ",\n        ".join(items)
+                return f"[\n        {inner}\n    ]"
+            # For string lists (e.g., participants), check symbol refs
+            items = [self._format_value_v33(v, all_symbols, parent_type, field_name, use_symbol) for v in value]
+            return f"[{', '.join(items)}]"
+        if isinstance(value, dict):
+            if not value:
+                return "{}"
+            pairs = [f"{repr(k)}: {self._format_value_v33(v, all_symbols)}" for k, v in value.items()]
+            return "{" + ", ".join(pairs) + "}"
+        if hasattr(value, "value"):
+            return repr(value.value)
+        return repr(value)
 
     def _format_value(self, value: Any) -> str:
         """Format a Python value as a .t2c.py literal."""

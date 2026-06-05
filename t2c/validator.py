@@ -66,6 +66,11 @@ class Validator:
         errors.extend(ref_errors)
         warnings.extend(ref_warnings)
 
+        # Step 3b: v3.3 Symbol reference validation
+        sym_errors, sym_warnings = self._validate_symbol_references(objects)
+        errors.extend(sym_errors)
+        warnings.extend(sym_warnings)
+
         # Step 4: Evidence validation (span/hash for EvidenceRef)
         ev_errors, ev_warnings = self._validate_evidence(objects)
         errors.extend(ev_errors)
@@ -91,10 +96,15 @@ class Validator:
         for v in schema_violations:
             errors.append(f"Schema violation in {v.object_type} ({v.object_id}): {v.field} — {v.message}")
 
-        # Reference validation
+        # Reference validation (ID-based)
         ref_errors, ref_warnings = self._validate_references(objects)
         errors.extend(ref_errors)
         warnings.extend(ref_warnings)
+
+        # v3.3: Symbol reference validation
+        sym_errors, sym_warnings = self._validate_symbol_references(objects)
+        errors.extend(sym_errors)
+        warnings.extend(sym_warnings)
 
         # Evidence validation
         ev_errors, ev_warnings = self._validate_evidence(objects)
@@ -190,9 +200,10 @@ class Validator:
                 )
                 # evidence_refs[].segment_id
                 for eref in data.get("evidence_refs", []):
+                    eref_data = self._unwrap_eref(eref)
                     self._check_ref(
                         obj_id, "Entity", "evidence_refs[].segment_id",
-                        eref.get("segment_id"),
+                        eref_data.get("segment_id"),
                         "Segment", id_sets, merged_id_sets, errors, warnings,
                     )
 
@@ -208,9 +219,10 @@ class Validator:
                     "Segment", id_sets, merged_id_sets, errors, warnings,
                 )
                 for eref in data.get("evidence_refs", []):
+                    eref_data = self._unwrap_eref(eref)
                     self._check_ref(
                         obj_id, "Event", "evidence_refs[].segment_id",
-                        eref.get("segment_id"),
+                        eref_data.get("segment_id"),
                         "Segment", id_sets, merged_id_sets, errors, warnings,
                     )
 
@@ -221,15 +233,14 @@ class Validator:
                 )
                 # object: only validate if it looks like an entity ID
                 obj_val = data.get("object")
-                if obj_val and self._is_entity_id_style(obj_val):
+                if obj_val and not self._is_symbol_marker(obj_val) and self._is_entity_id_style(str(obj_val)):
                     self._check_ref(
-                        obj_id, "Claim", "object", obj_val,
+                        obj_id, "Claim", "object", str(obj_val),
                         "Entity", id_sets, merged_id_sets, errors, warnings,
                     )
                 # source: Entity.id or Claim.id
                 source_val = data.get("source")
-                if source_val:
-                    # Try both Entity and Claim
+                if source_val and not self._is_symbol_marker(source_val):
                     found_in_entity = source_val in merged_id_sets.get("Entity", set())
                     found_in_claim = source_val in merged_id_sets.get("Claim", set())
                     if not found_in_entity and not found_in_claim:
@@ -254,9 +265,10 @@ class Validator:
                     "Segment", id_sets, merged_id_sets, errors, warnings,
                 )
                 for eref in data.get("evidence_refs", []):
+                    eref_data = self._unwrap_eref(eref)
                     self._check_ref(
                         obj_id, "Claim", "evidence_refs[].segment_id",
-                        eref.get("segment_id"),
+                        eref_data.get("segment_id"),
                         "Segment", id_sets, merged_id_sets, errors, warnings,
                     )
 
@@ -274,9 +286,10 @@ class Validator:
                     "Claim", id_sets, merged_id_sets, errors, warnings,
                 )
                 for eref in data.get("evidence_refs", []):
+                    eref_data = self._unwrap_eref(eref)
                     self._check_ref(
                         obj_id, "Relation", "evidence_refs[].segment_id",
-                        eref.get("segment_id"),
+                        eref_data.get("segment_id"),
                         "Segment", id_sets, merged_id_sets, errors, warnings,
                     )
 
@@ -286,9 +299,10 @@ class Validator:
                     "Segment", id_sets, merged_id_sets, errors, warnings,
                 )
                 for eref in data.get("evidence_refs", []):
+                    eref_data = self._unwrap_eref(eref)
                     self._check_ref(
                         obj_id, "Residual", "evidence_refs[].segment_id",
-                        eref.get("segment_id"),
+                        eref_data.get("segment_id"),
                         "Segment", id_sets, merged_id_sets, errors, warnings,
                     )
 
@@ -298,9 +312,10 @@ class Validator:
                     "Segment", id_sets, merged_id_sets, errors, warnings,
                 )
                 for eref in data.get("evidence_refs", []):
+                    eref_data = self._unwrap_eref(eref)
                     self._check_ref(
                         obj_id, "IgnoreSegment", "evidence_refs[].segment_id",
-                        eref.get("segment_id"),
+                        eref_data.get("segment_id"),
                         "Segment", id_sets, merged_id_sets, errors, warnings,
                     )
 
@@ -310,6 +325,24 @@ class Validator:
     def _is_entity_id_style(value: str) -> bool:
         """Check if a value looks like an Entity ID (contains '_ent_' prefix)."""
         return "_ent_" in value
+
+    @staticmethod
+    def _is_symbol_marker(value: object) -> bool:
+        """Check if a value is a __symbol__ marker dict from the parser."""
+        return isinstance(value, dict) and "__symbol__" in value
+
+    @staticmethod
+    def _unwrap_eref(eref: dict) -> dict:
+        """Unwrap an evidence_ref entry from parser output.
+
+        Parser may output either:
+        - {"segment_id": "...", ...} (old format)
+        - {"type": "EvidenceRef", "data": {"segment": {"__symbol__": "..."}, ...}} (new format)
+        Returns the flat data dict.
+        """
+        if "type" in eref and "data" in eref:
+            return eref["data"]
+        return eref
 
     def _check_ref(
         self,
@@ -325,6 +358,10 @@ class Validator:
     ) -> None:
         """Check a single reference value resolves to an existing object."""
         if ref_value is None:
+            return
+
+        # v3.3: skip __symbol__ markers — validated by _validate_symbol_references
+        if self._is_symbol_marker(ref_value):
             return
 
         # Check merged index (local + external)
@@ -363,6 +400,106 @@ class Validator:
                 obj_id, obj_type, f"{field_name}[{i}]",
                 ref_val, target_type, id_sets, merged_id_sets, errors, warnings,
             )
+
+    # -- v3.3 Symbol reference validation -----------------------------------
+
+    def _build_symbol_type_map(self, objects: list[dict]) -> dict[str, str]:
+        """Build {symbol_name: type_name} from objects with a 'symbol' field."""
+        sym_map: dict[str, str] = {}
+        for obj in objects:
+            symbol = obj.get("symbol")
+            type_name = obj.get("type", "")
+            if symbol and type_name:
+                if symbol in sym_map and sym_map[symbol] != type_name:
+                    # Duplicate symbol with different type — parser should catch this
+                    pass
+                sym_map[symbol] = type_name
+        return sym_map
+
+    # Expected types for symbol refs in different contexts
+    _SYMBOL_REF_EXPECTED_TYPES: dict[str, dict[str, str]] = {
+        # (parent_type, field_pattern) → expected_type
+        # Field patterns use * as wildcard for index
+    }
+
+    @staticmethod
+    def _get_symbol_ref_expected_type(parent_type: str, ref_path: str) -> str | None:
+        """Determine the expected type for a symbol ref based on parent type and path.
+
+        Path examples:
+        - "evidence_refs[0].segment" → expected: Segment
+        - "subject" → expected: Entity (if parent is Claim)
+        - "object" → expected: Entity (if parent is Claim)
+        - "participants[0]" → expected: Entity (if parent is Event)
+        - "claim" → expected: Claim (if parent is Relation)
+        """
+        # EvidenceRef segment → Segment (for any parent that has evidence_refs)
+        if ref_path.endswith(".segment") or ref_path == "segment":
+            return "Segment"
+
+        if parent_type == "Claim":
+            if ref_path in ("subject",) or ref_path.startswith("subject"):
+                return "Entity"
+            if ref_path in ("object",) or ref_path.startswith("object"):
+                return "Entity"
+
+        if parent_type == "Event":
+            if ref_path.startswith("participants"):
+                return "Entity"
+
+        if parent_type == "Relation":
+            if ref_path in ("subject",) or ref_path.startswith("subject"):
+                return "Entity"
+            if ref_path in ("object",) or ref_path.startswith("object"):
+                return "Entity"
+            if ref_path in ("claim",) or ref_path.startswith("claim"):
+                return "Claim"
+
+        return None
+
+    def _validate_symbol_references(self, objects: list[dict]) -> tuple[list[str], list[str]]:
+        """Validate that all symbol references point to symbols of the correct type.
+
+        Checks:
+        - EvidenceRef.segment symbol → Segment
+        - Claim.subject symbol → Entity
+        - Claim.object symbol → Entity
+        - Event.participants symbol → Entity
+        - Relation.subject/object symbol → Entity
+        - Relation.claim symbol → Claim
+        """
+        errors: list[str] = []
+        warnings: list[str] = []
+
+        sym_type_map = self._build_symbol_type_map(objects)
+
+        for obj in objects:
+            type_name = obj.get("type", "")
+            obj_id = obj.get("data", {}).get("id", "?")
+            symbol_refs: dict[str, str] = obj.get("__symbol_refs__", {})
+
+            if not symbol_refs:
+                continue
+
+            for path, sym_name in symbol_refs.items():
+                if sym_name not in sym_type_map:
+                    errors.append(
+                        f"Symbol reference error in {type_name} ({obj_id}): "
+                        f"symbol '{sym_name}' (at '{path}') is not defined"
+                    )
+                    continue
+
+                actual_type = sym_type_map[sym_name]
+                expected_type = self._get_symbol_ref_expected_type(type_name, path)
+
+                if expected_type and actual_type != expected_type:
+                    errors.append(
+                        f"Symbol reference error in {type_name} ({obj_id}): "
+                        f"'{path}' references symbol '{sym_name}' of type {actual_type}, "
+                        f"expected {expected_type}"
+                    )
+
+        return errors, warnings
 
     # -- Evidence validation ---------------------------------------------
 

@@ -167,7 +167,7 @@ class TestBannedConstructs:
 from t2c.ontology import Document
 x = 1
 '''
-        with pytest.raises(T2CParseError, match="Disallowed statement"):
+        with pytest.raises(T2CParseError, match="Assignment value must be a constructor call"):
             parser.parse_string(source)
 
     def test_function_definition(self, parser):

@@ -1,11 +1,39 @@
-"""Schema Validator — validate parsed objects against Pydantic model schemas."""
+"""Schema Validator — validate parsed objects against Pydantic model schemas.
+
+v3.3: handles __symbol__ markers from parser symbol refs, mapping
+codegen keyword names to ontology _symbol fields.
+"""
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 from pydantic import ValidationError
 
 from t2c.ontology import ONTOLOGY_CLASSES
+
+
+# Mapping: (constructor_type, keyword_name) → ontology_field_name for symbol refs.
+# The parser resolves symbol refs to IDs but preserves the keyword name from
+# the .t2c.py source. This table tells the schema validator how to rename
+# v3.3 codegen keywords to ontology field names.
+#
+# Example: EvidenceRef(segment=seg_0009, ...) → parser outputs data["segment"] = "seg1"
+# Schema maps "segment" → "segment_id" so Pydantic sees segment_id="seg1".
+# The __symbol_refs__ metadata is used to set segment_symbol="seg_0009".
+KEYWORD_TO_FIELD: dict[str, dict[str, str]] = {
+    "EvidenceRef": {"segment": "segment_id"},
+    "Claim": {},
+    "Event": {},
+    "Relation": {"claim": "claim_id"},
+}
+
+# Fields that should be propagated from __symbol_refs__ metadata
+SYMBOL_REF_TO_FIELD: dict[str, dict[str, str]] = {
+    "EvidenceRef": {"segment": "segment_symbol"},
+    "Claim": {"subject": "subject_symbol", "object": "object_symbol"},
+    "Event": {},
+    "Relation": {"subject": "subject_symbol", "object": "object_symbol", "claim": "claim_symbol"},
+}
 
 
 @dataclass
@@ -28,19 +56,33 @@ class SchemaValidator:
         return violations
 
     @staticmethod
-    def _flatten_nested(data: dict) -> dict:
-        """Replace {type, data} nested constructor dicts with just the data dict."""
+    def _flatten_nested(data: dict, type_name: str = "") -> dict:
+        """Replace {type, data} nested constructor dicts with just the data dict.
+
+        v3.3: maps v3.3 codegen keywords to ontology field names so Pydantic
+        validation sees the correct field names. E.g., EvidenceRef's 'segment'
+        keyword → 'segment_id' field.
+        """
+        kw_map = KEYWORD_TO_FIELD.get(type_name, {})
         flat: dict = {}
         for key, value in data.items():
+            # Map v3.3 keyword to ontology field name
+            mapped_key = kw_map.get(key, key)
+
             if isinstance(value, dict) and "type" in value and "data" in value:
-                flat[key] = value["data"]
+                nested_type = value["type"]
+                flat[mapped_key] = SchemaValidator._flatten_nested(value["data"], nested_type)
             elif isinstance(value, list):
-                flat[key] = [
-                    item["data"] if isinstance(item, dict) and "type" in item and "data" in item else item
-                    for item in value
-                ]
+                flat_list = []
+                for item in value:
+                    if isinstance(item, dict) and "type" in item and "data" in item:
+                        nested_type = item["type"]
+                        flat_list.append(SchemaValidator._flatten_nested(item["data"], nested_type))
+                    else:
+                        flat_list.append(item)
+                flat[mapped_key] = flat_list
             else:
-                flat[key] = value
+                flat[mapped_key] = value
         return flat
 
     def _validate_object(self, obj: dict) -> list[SchemaViolation]:
@@ -57,7 +99,7 @@ class SchemaValidator:
 
         obj_id = data.get("id", "?")
         try:
-            model_cls.model_validate(self._flatten_nested(data))
+            model_cls.model_validate(self._flatten_nested(data, type_name))
         except ValidationError as e:
             violations: list[SchemaViolation] = []
             for error in e.errors():
@@ -87,7 +129,7 @@ class SchemaValidator:
                 ))
                 continue
             try:
-                model = model_cls.model_validate(self._flatten_nested(data))
+                model = model_cls.model_validate(self._flatten_nested(data, type_name))
                 models.append(model)
             except ValidationError as e:
                 for error in e.errors():
