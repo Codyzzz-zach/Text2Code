@@ -118,16 +118,14 @@ class TestCase001Roundtrip:
 
 
 class TestCodegenVersion:
-    """v3.4.1: CodeGenerator version tag."""
+    """v4.1: CodeGenerator version tag."""
 
-    def test_default_header_is_v34_flash(self):
+    def test_default_header_is_current(self):
         from t2c.ontology import Entity
         gen = CodeGenerator()
         ent = Entity(id="e1", name="x", kind="person")
         code = gen.generate_knowledge_code([ent])
-        assert "v3.4-flash" in code
-        # Make sure we did not regress back to v3.2-flash.
-        assert "v3.2-flash" not in code
+        assert "v4.1" in code
 
     def test_custom_version(self):
         from t2c.ontology import Entity
@@ -135,7 +133,6 @@ class TestCodegenVersion:
         ent = Entity(id="e1", name="x", kind="person")
         code = gen.generate_knowledge_code([ent])
         assert "v3.5-flash" in code
-        assert "v3.4-flash" not in code
 
     def test_version_applied_to_document_code(self):
         gen = CodeGenerator(version="v3.4.1-flash")
@@ -154,4 +151,4 @@ class TestCodegenVersion:
             start_offset=0, end_offset=1, text_slice="x", hash=_sha256("x"),
         )
         code = gen.generate_segments_code([seg])
-        assert "v3.4-flash" in code
+        assert "v4.1" in code

@@ -31,7 +31,7 @@ KEYWORD_TO_FIELD: dict[str, dict[str, str]] = {
 SYMBOL_REF_TO_FIELD: dict[str, dict[str, str]] = {
     "EvidenceRef": {"segment": "segment_symbol"},
     "Claim": {"subject": "subject_symbol", "object": "object_symbol"},
-    "Event": {},
+    "Event": {"participants": "participant_symbols"},
     "Relation": {"subject": "subject_symbol", "object": "object_symbol", "claim": "claim_symbol"},
 }
 
@@ -115,12 +115,17 @@ class SchemaValidator:
         return []
 
     def validate_and_construct(self, objects: list[dict]) -> tuple[list, list[SchemaViolation]]:
-        """Validate and construct Pydantic models. Returns (models, violations)."""
+        """Validate and construct Pydantic models. Returns (models, violations).
+
+        v4.1: populates _symbol fields from __symbol_refs__ metadata so
+        parsed models carry symbol information for downstream use.
+        """
         models: list = []
         violations: list[SchemaViolation] = []
         for obj in objects:
             type_name = obj.get("type", "")
             data = obj.get("data", {})
+            symbol_refs: dict[str, str] = obj.get("__symbol_refs__", {})
             model_cls = ONTOLOGY_CLASSES.get(type_name)
             if model_cls is None:
                 violations.append(SchemaViolation(
@@ -129,7 +134,27 @@ class SchemaValidator:
                 ))
                 continue
             try:
-                model = model_cls.model_validate(self._flatten_nested(data, type_name))
+                flat_data = self._flatten_nested(data, type_name)
+                # Populate _symbol fields from __symbol_refs__ metadata
+                if symbol_refs:
+                    sym_map = SYMBOL_REF_TO_FIELD.get(type_name, {})
+                    for ref_key, symbol_name in symbol_refs.items():
+                        # Strip array indexing: "participants[0]" → "participants"
+                        base_field = ref_key.split("[")[0]
+                        target_field = sym_map.get(base_field)
+                        if target_field and target_field not in flat_data:
+                            # List fields (e.g., participants → participant_symbols)
+                            if base_field == "participants":
+                                # Collect all participant symbol refs
+                                participant_syms = []
+                                for key, sym_val in sorted(symbol_refs.items()):
+                                    if key.startswith("participants["):
+                                        participant_syms.append(sym_val)
+                                if participant_syms:
+                                    flat_data[target_field] = participant_syms
+                            else:
+                                flat_data[target_field] = symbol_name
+                model = model_cls.model_validate(flat_data)
                 models.append(model)
             except ValidationError as e:
                 for error in e.errors():

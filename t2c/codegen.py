@@ -93,21 +93,20 @@ FIELD_ORDER: dict[str, list[str]] = {
     "CoverageReport": ["id", "doc_id", "total_segments", "status_counts", "requires_raw_fallback", "generated_at"],
 }
 
-# v3.4.1: bump version tag so generated .t2c.py headers reflect the engine that wrote them.
-_DEFAULT_VERSION = "v3.4-flash"
+# v4.1: bump version tag for codegraph-native default.
+_DEFAULT_VERSION = "v4.1"
 
 
 class CodeGenerator:
     """Deterministically generate .t2c.py from ontology objects."""
 
-    def __init__(self, version: str | None = None, emit_symbol_refs: bool = False) -> None:
+    def __init__(self, version: str | None = None, emit_symbol_refs: bool = True) -> None:
         # Override the default version tag (used in file headers).
         # None → use _DEFAULT_VERSION; pass e.g. "v3.5-flash" to future-proof tests.
         self._version = version or _DEFAULT_VERSION
-        # v4.0 default: emit string literals for all fields so generated
-        # .t2c.py is import-safe under stock Pydantic. The v3.3 mode
-        # (symbol refs in EvidenceRef.segment_id and friends) is opt-in
-        # for tests and the v3.3 pipeline that requires it.
+        # v4.1 default: emit symbol refs for all reference fields so
+        # generated .t2c.py is codegraph-native. Pass emit_symbol_refs=False
+        # to revert to string-literal-only mode for legacy pipelines.
         self._emit_symbol_refs = emit_symbol_refs
 
     def generate_document_code(
@@ -226,6 +225,53 @@ class CodeGenerator:
                 return slug
         # Pure non-ASCII → caller falls back to hash
         return None
+
+    @staticmethod
+    def _format_comment(obj: BaseModel) -> str:
+        """Generate an inline comment for FTS5 searchability.
+
+        Returns a human-readable summary appended after the assignment line
+        so CodeGraph's tree-sitter captures it as part of the node's context,
+        making the symbol findable via full-text search on Chinese names.
+        """
+        type_name = obj.__class__.__name__
+        if type_name == "Entity":
+            name = getattr(obj, "name", "")
+            kind = getattr(obj, "kind", "")
+            return f"# {name} ({kind})"
+        if type_name == "Event":
+            name = getattr(obj, "name", "")
+            return f"# {name}"
+        if type_name == "Claim":
+            subj = getattr(obj, "subject", "")
+            pred = getattr(obj, "predicate", "")
+            obj_val = getattr(obj, "object", "") or ""
+            parts = f"{subj} {pred} {obj_val}".rstrip()
+            return f"# {parts}"
+        if type_name == "Segment":
+            text = getattr(obj, "text_slice", "")
+            preview = text[:40]
+            suffix = "..." if len(text) > 40 else ""
+            return f"# {preview}{suffix}"
+        if type_name == "Document":
+            return f"# {getattr(obj, 'source_path', '')}"
+        if type_name == "Block":
+            return f"# block {getattr(obj, 'index', 0)}"
+        if type_name == "Relation":
+            subj = getattr(obj, "subject", "")
+            pred = getattr(obj, "predicate", "")
+            obj_val = getattr(obj, "object", "")
+            return f"# {subj} {pred} {obj_val}"
+        if type_name == "Residual":
+            cat = getattr(obj, "category", "")
+            reason = getattr(obj, "reason", "")[:40]
+            return f"# {cat}: {reason}"
+        if type_name == "IgnoreSegment":
+            reason = getattr(obj, "reason", "")[:40]
+            return f"# {reason}"
+        if type_name == "CoverageReport":
+            return f"# coverage: {getattr(obj, 'doc_id', '')}"
+        return ""
 
     def _compute_symbol_names(
         self,
@@ -382,19 +428,34 @@ class CodeGenerator:
 
         # Document
         doc_sym = symbols.get(doc.id, "doc_0000")
-        lines.append(f"{doc_sym} = {self._format_object_v33(doc, symbols)}")
+        doc_formatted = self._format_object_v33(doc, symbols)
+        doc_comment = self._format_comment(doc)
+        if doc_comment:
+            lines.append(f"{doc_sym} = {doc_formatted}  {doc_comment}")
+        else:
+            lines.append(f"{doc_sym} = {doc_formatted}")
         lines.append("")
 
         # Blocks
         for block in blocks:
             blk_sym = symbols.get(block.id, f"blk_{block.index:04d}")
-            lines.append(f"{blk_sym} = {self._format_object_v33(block, symbols)}")
+            blk_formatted = self._format_object_v33(block, symbols)
+            blk_comment = self._format_comment(block)
+            if blk_comment:
+                lines.append(f"{blk_sym} = {blk_formatted}  {blk_comment}")
+            else:
+                lines.append(f"{blk_sym} = {blk_formatted}")
             lines.append("")
 
         # Segments
         for seg in segments:
             seg_sym = symbols.get(seg.id, f"seg_{len(lines):04d}")
-            lines.append(f"{seg_sym} = {self._format_object_v33(seg, symbols)}")
+            seg_formatted = self._format_object_v33(seg, symbols)
+            seg_comment = self._format_comment(seg)
+            if seg_comment:
+                lines.append(f"{seg_sym} = {seg_formatted}  {seg_comment}")
+            else:
+                lines.append(f"{seg_sym} = {seg_formatted}")
             lines.append("")
 
         return {"text.py": "\n".join(lines) + "\n"}
@@ -581,12 +642,16 @@ class CodeGenerator:
 
         lines.append("")
 
-        # Format each object as assignment
+        # Format each object as assignment with FTS5 comment
         for obj in objects:
             obj_id = getattr(obj, "id", None)
             sym = symbols.get(obj_id, f"obj_{len(lines):04d}")
             formatted = self._format_object_v33(obj, {**symbols, **ext_syms})
-            lines.append(f"{sym} = {formatted}")
+            comment = self._format_comment(obj)
+            if comment:
+                lines.append(f"{sym} = {formatted}  {comment}")
+            else:
+                lines.append(f"{sym} = {formatted}")
             lines.append("")
 
         return "\n".join(lines) + "\n"
@@ -814,12 +879,21 @@ class CodeGenerator:
         self,
         report: CoverageReport,
     ) -> str:
-        """Generate coverage.py from a CoverageReport Pydantic model."""
+        """Generate coverage.py from a CoverageReport Pydantic model.
+
+        v4.1: uses assignment format so CodeGraph indexes the CoverageReport
+        as a variable node (not an orphaned expression).
+        """
+        formatted = self._format_object(report)
+        comment = self._format_comment(report)
+        assignment = f"coverage_report = {formatted}"
+        if comment:
+            assignment = f"{assignment}  {comment}"
         lines = [
             f"# Auto-generated by t2c {self._version} — DO NOT EDIT",
             "from t2c.ontology import CoverageReport",
             "",
-            self._format_object(report),
+            assignment,
             "",
         ]
         return "\n".join(lines)
@@ -876,17 +950,13 @@ class CodeGenerator:
         for sid, sym in seg_id_to_sym.items():
             all_symbols[sym] = ".text"
 
+        # Pre-declare symbol maps so they're accessible across blocks
+        ent_syms: dict[str, str] = {}
+        clm_syms: dict[str, str] = {}
+
         # --- entities.py ---
         if entities:
-            # Reuse generate_semantic_code_v33; it partitions by type.
-            # Patch the internal _generate_type_file_v33 path: we go through
-            # the public method, then for multi-file compilation we need to
-            # override the cross-file imports. The easiest path: bypass
-            # generate_semantic_code_v33 (which only handles one type) and
-            # build the file directly.
-            ext_syms = dict(seg_id_to_sym)
             ent_syms = self._compute_symbol_names(list(entities))
-            ext_syms.update(ent_syms)
             files["entities.py"] = self._generate_type_file_v33(
                 list(entities), ent_syms, ["Entity", "EvidenceRef"],
                 external_symbols=seg_id_to_sym,
@@ -898,13 +968,14 @@ class CodeGenerator:
         # --- events.py ---
         if events:
             evt_syms = self._compute_symbol_names(list(events))
-            ext_syms = dict(seg_id_to_sym)
-            # events reference entity symbols (if any) and segment symbols
-            # We pass ent syms in if available from entities
+            # Events reference both segment symbols and entity symbols
+            evt_ext_syms = dict(seg_id_to_sym)
+            if ent_syms:
+                evt_ext_syms.update(ent_syms)
             files["events.py"] = self._generate_type_file_v33(
                 list(events), evt_syms, ["Event", "EvidenceRef"],
-                external_symbols=seg_id_to_sym,
-                external_modules={".text"},
+                external_symbols=evt_ext_syms,
+                external_modules={".text", ".entities"} if ent_syms else {".text"},
             )
             for sym in _scan_top_level_symbols(files["events.py"]):
                 all_symbols[sym] = ".events"
@@ -912,8 +983,6 @@ class CodeGenerator:
         # --- claims.py ---
         if claims:
             clm_syms = self._compute_symbol_names(list(claims))
-            # Build the full ext_syms for claims: segments (from .text) + entities
-            # (from .entities). Both lookups happen in _generate_type_file_v33.
             claim_ext_syms = dict(seg_id_to_sym)
             if entities:
                 ent_syms_for_claims = self._compute_symbol_names(list(entities))
@@ -941,9 +1010,15 @@ class CodeGenerator:
         # --- derived.py (Relation) ---
         if relations:
             rel_syms = self._compute_symbol_names(list(relations))
+            # Relations reference segments, entities, and claims
+            derived_ext_syms = dict(seg_id_to_sym)
+            if ent_syms:
+                derived_ext_syms.update(ent_syms)
+            if clm_syms:
+                derived_ext_syms.update(clm_syms)
             files["derived.py"] = self._generate_type_file_v33(
                 list(relations), rel_syms, ["Relation", "EvidenceRef"],
-                external_symbols=seg_id_to_sym,
+                external_symbols=derived_ext_syms,
                 external_modules={".text", ".entities", ".claims"},
             )
             for sym in _scan_top_level_symbols(files["derived.py"]):
