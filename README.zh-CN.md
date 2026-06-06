@@ -12,7 +12,7 @@
 <br />
 <div align="center">
   <a href="https://github.com/Codyzzz-zach/Text2Code">
-    <img src="../images/logo.svg" alt="Text2Code Logo" width="80" height="80">
+    <img src="images/logo.svg" alt="Text2Code Logo" width="80" height="80">
   </a>
 
   <h3 align="center">Text2Code</h3>
@@ -20,7 +20,7 @@
   <p align="center">
     将自然语言文本转化为可执行的知识代码
     <br />
-    <a href="../README.md">English</a>
+    <a href="README.md">English</a>
     &middot;
     <a href="https://github.com/Codyzzz-zach/Text2Code/issues/new?labels=bug&template=bug-report---.md">报告 Bug</a>
     &middot;
@@ -251,9 +251,9 @@ Text2Code/
 
 | 版本 | 文档 | 核心创新 |
 |:-----|:-----|:---------|
-| v4.0 | [t2c_design_v4.0.md](../spec/t2c_design_v4.0.md) | 编译器模型；CodeGraph 原生输出；12-gate 校验 |
-| v3.3 | [t2c_design_v3.3.md](../spec/t2c_design_v3.3.md) | 符号分配；跨文件引用；紧凑协议 |
-| v3.0–v3.2 | [archive/](../spec/archive/) | 图谱知识提取演进 |
+| v4.0 | [t2c_design_v4.0.md](spec/t2c_design_v4.0.md) | 编译器模型；CodeGraph 原生输出；12-gate 校验 |
+| v3.3 | [t2c_design_v3.3.md](spec/t2c_design_v3.3.md) | 符号分配；跨文件引用；紧凑协议 |
+| v3.0–v3.2 | [archive/](spec/archive/) | 图谱知识提取演进 |
 
 <p align="right">(<a href="#readme-top">回到顶部</a>)</p>
 
@@ -277,7 +277,7 @@ Text2Code/
 <!-- 许可证 -->
 ## 许可证
 
-本项目基于 MIT 许可证分发。详见 [`LICENSE`](../LICENSE)。
+本项目基于 MIT 许可证分发。详见 [`LICENSE`](LICENSE)。
 
 <p align="right">(<a href="#readme-top">回到顶部</a>)</p>
 

@@ -20,7 +20,7 @@
   <p align="center">
     A cognitive engine that transforms natural language text into executable Knowledge Code.
     <br />
-    <a href="docs/README.zh-CN.md">中文文档</a>
+    <a href="README.zh-CN.md">中文文档</a>
     &middot;
     <a href="https://github.com/Codyzzz-zach/Text2Code/issues/new?labels=bug&template=bug-report---.md">Report Bug</a>
     &middot;
