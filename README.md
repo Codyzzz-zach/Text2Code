@@ -12,7 +12,7 @@
 <br />
 <div align="center">
   <a href="https://github.com/Codyzzz-zach/Text2Code">
-    <img src="images/logo.svg" alt="Text2Code Logo" width="80" height="80">
+    <img src="images/logo.png" alt="Text2Code Logo" width="120" height="120">
   </a>
 
   <h3 align="center">Text2Code</h3>
