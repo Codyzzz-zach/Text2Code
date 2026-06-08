@@ -1,11 +1,12 @@
-"""Tests for CodeGraph adaptation — v4.1 codegraph-native .t2c.py output.
+"""Tests for CodeGraph adaptation — v4.1 .t2c.py output.
 
 Proves:
-- emit_symbol_refs defaults to True (symbol refs, not string literals)
+- emit_symbol_refs defaults to False (string literals, Pydantic-safe)
 - Cross-file imports are complete for all file types (events, derived, claims)
 - CoverageReport uses assignment format (not orphaned call)
 - Inline comments provide FTS5-searchable Chinese names
 - SYMBOL_REF_TO_FIELD populates _symbol fields from __symbol_refs__ metadata
+- Symbol refs mode (emit_symbol_refs=True) is available but breaks Pydantic
 """
 from __future__ import annotations
 
@@ -60,11 +61,11 @@ def _make_doc_seg():
 
 
 class TestEmitSymbolRefsDefault:
-    """emit_symbol_refs defaults to True for codegraph-native output."""
+    """emit_symbol_refs defaults to False (Pydantic-safe string literals)."""
 
-    def test_default_emit_symbol_refs_is_true(self):
+    def test_default_emit_symbol_refs_is_false(self):
         gen = CodeGenerator()
-        assert gen._emit_symbol_refs is True
+        assert gen._emit_symbol_refs is False
 
     def test_explicit_false_produces_string_literals(self):
         """When emit_symbol_refs=False, reference fields use string literals."""
@@ -86,8 +87,8 @@ class TestEmitSymbolRefsDefault:
         assert "subject='ent1'" in code
         assert "object='ent2'" in code
 
-    def test_symbol_refs_in_multi_file_output(self):
-        """Multi-file compilation emits symbol refs by default."""
+    def test_string_literals_in_multi_file_output(self):
+        """Multi-file compilation emits string literals by default (Pydantic-safe)."""
         doc, blk, seg = _make_doc_seg()
         ent1 = Entity(id="ent1", name="甄士隐", kind="person")
         ent2 = Entity(id="ent2", name="姑苏", kind="location")
@@ -109,16 +110,36 @@ class TestEmitSymbolRefsDefault:
             entities=[ent1, ent2], claims=[claim], relations=[rel],
         )
 
-        # claims.py should use symbol refs for subject/object
+        # claims.py should use string literals for subject/object
+        claims_code = files["claims.py"]
+        assert "subject='ent1'" in claims_code, f"Expected string literal in claims.py, got: {claims_code}"
+        assert "object='ent2'" in claims_code
+
+        # derived.py should use string literals for subject/object/claim
+        derived_code = files["derived.py"]
+        assert "subject='ent1'" in derived_code
+        assert "object='ent2'" in derived_code
+        assert "claim_id='clm1'" in derived_code
+
+    def test_symbol_refs_available_when_explicitly_enabled(self):
+        """emit_symbol_refs=True produces symbol refs (but breaks Pydantic)."""
+        doc, blk, seg = _make_doc_seg()
+        ent1 = Entity(id="ent1", name="甄士隐", kind="person")
+        ent2 = Entity(id="ent2", name="姑苏", kind="location")
+        claim = Claim(
+            id="clm1", subject="ent1", predicate="lives_in", object="ent2",
+            modality="asserted", polarity="positive",
+        )
+
+        gen = CodeGenerator(emit_symbol_refs=True)
+        files = gen.generate_multi_file_compilation(
+            doc=doc, blocks=[blk], segments=[seg],
+            entities=[ent1, ent2], claims=[claim],
+        )
+
+        # Symbol ref mode: subject=ent_zh_..., not subject='ent1'
         claims_code = files["claims.py"]
         assert "subject=ent_" in claims_code, f"Expected symbol ref in claims.py, got: {claims_code}"
-        assert "object=ent_" in claims_code
-
-        # derived.py should use symbol refs for subject/object/claim
-        derived_code = files["derived.py"]
-        assert "subject=ent_" in derived_code
-        assert "object=ent_" in derived_code
-        assert "claim=claim_" in derived_code
 
 
 # ---------------------------------------------------------------------------
@@ -130,7 +151,7 @@ class TestCrossFileImports:
     """All semantic files must import the symbols they reference."""
 
     def test_events_py_imports_entity_symbols(self):
-        """events.py must import entity symbols for participant refs."""
+        """events.py must import entity symbols for CodeGraph imports edge."""
         doc, blk, seg = _make_doc_seg()
         ent = Entity(id="ent1", name="甄士隐", kind="person")
         evt = Event(
@@ -148,12 +169,12 @@ class TestCrossFileImports:
         )
 
         events_code = files["events.py"]
-        # Must import the entity symbol from .entities
+        # Must import the entity symbol from .entities (for CodeGraph imports edge)
         assert "from .entities import" in events_code, (
             f"events.py should import from .entities\n{events_code}"
         )
-        # Must use symbol ref for participants
-        assert "participants=[ent_" in events_code
+        # Default mode: participants use string literals (Pydantic-safe)
+        assert "participants=['ent1']" in events_code
 
     def test_derived_py_imports_entity_and_claim_symbols(self):
         """derived.py must import entity and claim symbols."""

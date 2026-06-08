@@ -1,0 +1,114 @@
+{
+  "extraction_counts": {
+    "entities_total": 8,
+    "person_entities": 8,
+    "events_total": 4,
+    "claims_total": 8,
+    "relations_total": 0,
+    "residuals_total": 111,
+    "segments_total": 133
+  },
+  "entity_metrics": {
+    "person_names_extracted": [
+      "金氏",
+      "秦钟",
+      "贾宝玉",
+      "王熙凤",
+      "张友士",
+      "冯紫英",
+      "来升",
+      "太爷"
+    ],
+    "person_count": 8,
+    "ground_truth_characters": [
+      "金荣",
+      "金寡妇",
+      "胡氏",
+      "贾璜",
+      "尤氏",
+      "秦可卿",
+      "张太医",
+      "宝玉",
+      "贾珍",
+      "秦钟",
+      "智能",
+      "凤姐"
+    ],
+    "true_positives": [
+      "秦钟"
+    ],
+    "false_negatives": [
+      "胡氏",
+      "尤氏",
+      "智能",
+      "贾璜",
+      "宝玉",
+      "张太医",
+      "金寡妇",
+      "金荣",
+      "秦可卿",
+      "凤姐",
+      "贾珍"
+    ],
+    "false_positives": [
+      "张友士",
+      "冯紫英",
+      "王熙凤",
+      "贾宝玉",
+      "来升",
+      "太爷",
+      "金氏"
+    ],
+    "recall_rate": 8.333333333333332,
+    "precision_rate": 12.5
+  },
+  "coverage_metrics": {
+    "segments_total": 133,
+    "segments_covered": 12,
+    "segments_partial": 5,
+    "segments_uncovered": 116,
+    "coverage_rate": 9.022556390977442
+  },
+  "evidence_metrics": {
+    "objects_with_evidence": 20,
+    "total_semantic_objects": 20,
+    "evidence_rate": 100.0
+  },
+  "residual_metrics": {
+    "total": 111,
+    "categories": {
+      "structural": 111
+    },
+    "importance": {
+      "medium": 111
+    },
+    "entropy": 0.0
+  },
+  "predicate_metrics": {
+    "predicates_used": {
+      "illness_cause": 1,
+      "mood": 1,
+      "morning_meal": 1,
+      "treatment": 1,
+      "has_ability": 1,
+      "introduces": 1,
+      "birthday": 1,
+      "prefers": 1
+    },
+    "unique_predicates": 8
+  },
+  "pipeline_metrics": {
+    "candidates_extracted": 35,
+    "saved_count": 35,
+    "rejected_count": 0,
+    "raw_fallback_segments": 111,
+    "repair_attempts": 0,
+    "errors_count": 0,
+    "warnings_count": 0
+  },
+  "llm_telemetry": {
+    "total_input_tokens": 1506,
+    "total_output_tokens": 7498,
+    "api_elapsed_sec": 152.31328630447388
+  }
+}

@@ -100,13 +100,17 @@ _DEFAULT_VERSION = "v4.1"
 class CodeGenerator:
     """Deterministically generate .t2c.py from ontology objects."""
 
-    def __init__(self, version: str | None = None, emit_symbol_refs: bool = True) -> None:
+    def __init__(self, version: str | None = None, emit_symbol_refs: bool = False) -> None:
         # Override the default version tag (used in file headers).
         # None → use _DEFAULT_VERSION; pass e.g. "v3.5-flash" to future-proof tests.
         self._version = version or _DEFAULT_VERSION
-        # v4.1 default: emit symbol refs for all reference fields so
-        # generated .t2c.py is codegraph-native. Pass emit_symbol_refs=False
-        # to revert to string-literal-only mode for legacy pipelines.
+        # v4.1: emit_symbol_refs defaults to False. Reference fields use string
+        # literals (Pydantic-safe). CodeGraph discovers relationships via FTS5
+        # on the `signature` field (which captures the RHS text) and inline
+        # comments (which capture Chinese names). Cross-file imports are still
+        # generated for CodeGraph `imports` edges. Pass True to emit symbol
+        # refs (note: this breaks Pydantic validation at import time for str
+        # fields like Claim.subject that receive Entity objects).
         self._emit_symbol_refs = emit_symbol_refs
 
     def generate_document_code(
@@ -608,10 +612,14 @@ class CodeGenerator:
                 seg_id = getattr(eref, "segment_id", None)
                 if seg_id and seg_id in ext_syms:
                     seg_sym = ext_syms[seg_id]
-                    # Heuristic: if the symbol is in ext_syms under a segment
-                    # ID, it's a segment → import from .text. (Other types
-                    # aren't passed in ext_syms for the segment ID space.)
                     mod_syms.setdefault(".text", []).append(seg_sym)
+
+            # Check Residual/IgnoreSegment segment_id for symbol refs
+            # These objects have a direct segment_id attribute (not in evidence_refs)
+            if obj.__class__.__name__ in ("Residual", "IgnoreSegment"):
+                seg_id = getattr(obj, "segment_id", None)
+                if seg_id and seg_id in ext_syms:
+                    mod_syms.setdefault(".text", []).append(ext_syms[seg_id])
 
             # Check Claim subject/object for entity symbol refs
             if obj.__class__.__name__ == "Claim":
@@ -999,8 +1007,12 @@ class CodeGenerator:
         if residuals or ignores:
             res_ign = list(residuals or []) + list(ignores or [])
             res_ign_syms = self._compute_symbol_names(res_ign, seg_symbols=seg_id_to_sym)
+            # Include IgnoreSegment in type_names if any IgnoreSegment objects exist
+            res_type_names = ["Residual", "EvidenceRef"]
+            if ignores:
+                res_type_names.append("IgnoreSegment")
             files["residuals.py"] = self._generate_type_file_v33(
-                res_ign, res_ign_syms, ["Residual", "EvidenceRef"],
+                res_ign, res_ign_syms, res_type_names,
                 external_symbols=seg_id_to_sym,
                 external_modules={".text"},
             )
