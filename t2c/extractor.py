@@ -146,20 +146,12 @@ EXTRACTION_PROMPT = """\
 # LLM NOT to emit Relation (program-derived) or EvidenceRef (computed from
 # `q` quotes). Residual is intentionally absent here — it is a separate
 # second-stage concern.
-COMPACT_PROMPT = """\
-你是一个文学文本结构化专家。从以下《红楼梦》第{chapter_num}回「{chapter_title}」的文本中提取**紧凑**候选对象。
-
-## 输入文本
-
-每行格式：`[segment_id] 文本内容`
-
-{segments_formatted}
-
-{existing_entities_section}
+COMPACT_PROMPT_PREFIX = """\
+你是一个文学文本结构化专家。从提供的文本中提取**紧凑**候选对象。
 
 ## 输出要求
 
-**只输出 JSON 数组**。每个元素是单个候选对象，字段尽量短。只用以下四种 type：
+**只输出 JSON 数组**。每个元素是单个候选对象，字段尽量短。只用以下三种 type：
 
 ### E = Entity（实体）
 ```json
@@ -194,12 +186,6 @@ COMPACT_PROMPT = """\
 - `m` = modality (asserted/reported/claimed_by_source/uncertain/hypothetical/conditional/inferred)
 - `pol` = polarity (positive/negative)
 
-### I = IgnoreSegment（忽略）
-```json
-{{"t":"I","sid":"seg1","r":"chapter title"}}
-```
-- `r` = 忽略原因
-
 ## 严禁输出
 
 - **R (Relation)** — 由程序从 Claim 自动派生（仅 modality=asserted + polarity=positive + entity-entity + 有证据）
@@ -217,6 +203,21 @@ COMPACT_PROMPT = """\
 5. `q` 给出一小段原文引用即可，程序会精确定位并算 hash
 6. `sid` 必须是输入中真实存在的 segment id
 7. 不编造，不推断，找不到的宁可不写
+"""
+
+COMPACT_PROMPT_SUFFIX = """\
+
+## 本次任务
+
+文档：{doc_id}，第{chapter_num}回「{chapter_title}」
+
+## 输入文本
+
+每行格式：`[segment_id] 文本内容`
+
+{segments_formatted}
+
+{existing_entities_section}
 
 请直接返回紧凑 JSON 数组。
 """
@@ -225,7 +226,7 @@ COMPACT_PROMPT = """\
 # v3.4.2: 1200 chars / batch — paired with the compact protocol and a
 # shorter prompt, this keeps input tokens modest while still letting
 # multiple segments land in a single batch.
-_MAX_BATCH_CHARS = 1200
+_MAX_BATCH_CHARS = 4000
 
 # Default output cap.
 # v3.4.2: lowered from 32768 to 8192. The compact protocol is much terser
@@ -241,7 +242,7 @@ _DEFAULT_THINKING_BUDGET = 1024
 
 # Default protocol + prompt version. Bump either to force a cache wipe.
 _DEFAULT_EXTRACTOR_PROTOCOL = "compact-v1"
-_DEFAULT_PROMPT_VERSION = "compact-main-v1"
+_DEFAULT_PROMPT_VERSION = "compact-main-v2"
 _VERBOSE_EXTRACTOR_PROTOCOL = "verbose-v1"
 _VERBOSE_PROMPT_VERSION = "verbose-main-v1"
 
@@ -457,6 +458,8 @@ class LLMExtractor:
                         continue
 
             batch_elapsed = time.time() - batch_t0
+            if self._last_batch_truncated and batch_status == "ok":
+                batch_status = "truncated"
             self._batch_timings.append({
                 "batch_index": i + 1,
                 "segment_count": len(batch),
@@ -507,7 +510,8 @@ class LLMExtractor:
         t0 = time.time()
         response = None
         try:
-            kwargs["thinking"] = {"type": "enabled", "budget_tokens": self._thinking_budget}
+            if self._thinking_budget:
+                kwargs["thinking"] = {"type": "enabled", "budget_tokens": self._thinking_budget}
             response = self._client.messages.create(**kwargs)
         except TypeError:
             # Fallback: API doesn't support thinking parameter
@@ -651,7 +655,8 @@ class LLMExtractor:
         t0 = time.time()
         response = None
         try:
-            kwargs["thinking"] = {"type": "enabled", "budget_tokens": self._thinking_budget}
+            if self._thinking_budget:
+                kwargs["thinking"] = {"type": "enabled", "budget_tokens": self._thinking_budget}
             response = self._client.messages.create(**kwargs)
         except TypeError:
             kwargs.pop("thinking", None)
@@ -817,7 +822,8 @@ class LLMExtractor:
             existing_section = "## 已知人物（前几回已提取，直接复用其 ID）\n\n" + "\n".join(lines)
         else:
             existing_section = ""
-        return COMPACT_PROMPT.format(
+        return COMPACT_PROMPT_PREFIX + COMPACT_PROMPT_SUFFIX.format(
+            doc_id=doc_id,
             chapter_num=chapter_num,
             chapter_title=chapter_title,
             segments_formatted=segments_formatted,

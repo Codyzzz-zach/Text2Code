@@ -18,7 +18,7 @@ from t2c.validator import Validator
 
 logger = logging.getLogger(__name__)
 
-MAX_REPAIR_ATTEMPTS = 2
+MAX_REPAIR_ATTEMPTS = 1
 
 
 @dataclass
@@ -157,6 +157,8 @@ class Pipeline:
         # Step 6: Repair loop
         t0 = time.time()
         repair_attempts = 0
+        if val_result.valid:
+            logger.info("Validation passed — skipping repair loop")
         while not val_result.valid and repair_attempts < self._max_repair:
             repair_attempts += 1
             logger.info("Repair attempt %d/%d", repair_attempts, self._max_repair)

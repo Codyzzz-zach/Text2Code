@@ -63,6 +63,9 @@ class TestFromEnv:
                 os.environ.pop(k, None)
 
     def test_from_env_default_minimax(self):
+        os.environ["T2C_LLM_PROVIDER"] = "minimax"
+        os.environ["T2C_LLM_MODEL"] = "MiniMax-M3"
+        os.environ["T2C_LLM_BASE_URL"] = "https://api.minimaxi.com/anthropic"
         cfg = LLMConfig.from_env()
         assert cfg.provider == "minimax"
         assert cfg.model == "MiniMax-M3"

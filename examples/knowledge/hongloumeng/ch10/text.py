@@ -7,7 +7,7 @@ doc_hongloumeng = Document(
     raw_text_hash='sha256:d60a7fcd43e7b994eadb5fc22e6f6a15f0d87bf77fa7f244e2a10ba0305fe969',
     total_length=5116,
     block_count=0,
-    created_at='2026-06-08T02:05:33.596632+00:00'
+    created_at='2026-06-08T06:55:04.099819+00:00'
 )  # data/rawtxt/红楼梦.txt
 
 seg_0001 = Segment(

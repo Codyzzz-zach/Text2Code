@@ -6,6 +6,7 @@ Public API:
     LLMConfig.minimax(api_key=...)        # preset for MiniMax public endpoint
     LLMConfig.anthropic(api_key=...)      # preset for Anthropic API
     LLMConfig.openai(api_key=..., ...)    # preset for OpenAI-compatible
+    LLMConfig.deepseek(api_key=..., ...)  # preset for DeepSeek (Anthropic format)
     LLMConfig.custom(provider=..., ...)   # any other OpenAI-compatible endpoint
 
 Usage:
@@ -45,6 +46,11 @@ _PROVIDER_PRESETS: dict[str, dict[str, str]] = {
         "base_url": "https://api.openai.com/v1",
         "default_model": "gpt-4o",
         "api_key_env": "OPENAI_API_KEY",
+    },
+    "deepseek": {
+        "base_url": "https://api.deepseek.com/anthropic",
+        "default_model": "deepseek-v4-flash",
+        "api_key_env": "DEEPSEEK_API_KEY",
     },
 }
 
@@ -155,6 +161,24 @@ class LLMConfig:
         )
 
     @classmethod
+    def deepseek(cls, *, api_key: str | None = None, model: str | None = None,
+                 base_url: str | None = None, **kwargs: Any) -> "LLMConfig":
+        """Preset for DeepSeek via Anthropic-compatible API.
+
+        DeepSeek supports the Anthropic Messages API format at
+        https://api.deepseek.com/anthropic, enabling context-hard-disk
+        cache hits on shared prompt prefixes.
+        """
+        preset = _PROVIDER_PRESETS["deepseek"]
+        return cls(
+            provider="deepseek",
+            model=model or preset["default_model"],
+            base_url=base_url or preset["base_url"],
+            api_key=api_key or os.environ.get(preset["api_key_env"], ""),
+            **kwargs,
+        )
+
+    @classmethod
     def custom(cls, *, provider: str, model: str, base_url: str,
                api_key: str | None = None, **kwargs: Any) -> "LLMConfig":
         """Any other OpenAI-compatible endpoint."""
@@ -178,7 +202,7 @@ class LLMConfig:
         T2C_LLM_* overrides, then any explicit `overrides` kwargs.
 
         Recognized env vars:
-            T2C_LLM_PROVIDER       (minimax / anthropic / openai / custom:<name>)
+            T2C_LLM_PROVIDER       (minimax / anthropic / openai / deepseek / custom:<name>)
             T2C_LLM_MODEL          (model name)
             T2C_LLM_BASE_URL       (endpoint URL)
             T2C_LLM_API_KEY        (key)

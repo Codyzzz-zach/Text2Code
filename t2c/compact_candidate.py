@@ -53,7 +53,6 @@ VALID_COMPACT_TYPES = frozenset({
     COMPACT_TYPE_ENTITY,
     COMPACT_TYPE_EVENT,
     COMPACT_TYPE_CLAIM,
-    COMPACT_TYPE_IGNORE,
 })
 
 # Verbose type names used downstream by SchemaValidator / CodeGenerator.
@@ -260,15 +259,6 @@ def _parse_single(item: dict[str, Any], raw_index: int) -> CompactCandidate | No
         else:
             fields["polarity"] = "positive"
             warnings.append(f"unknown polarity {pol!r}; defaulted to 'positive'")
-
-    if t == COMPACT_TYPE_IGNORE:
-        r = item.get("r", "")
-        if not isinstance(r, str):
-            r = str(r)
-        fields["reason"] = r
-        # IgnoreSegment only needs the segment_id (in sid[0])
-        if not fields["source_segment_ids"]:
-            warnings.append("IgnoreSegment missing segment_id")
 
     return CompactCandidate(
         type=t,
@@ -598,17 +588,6 @@ def expand_candidates(
             clm_counter += 1
             objects.append({"type": "Claim", "data": data})
 
-        elif c.type == COMPACT_TYPE_IGNORE:
-            sid_list = c.fields.get("source_segment_ids", [])
-            seg_id = sid_list[0] if sid_list else ""
-            data = {
-                "id": f"{doc_id}_ign_{ign_counter:04d}",
-                "segment_id": seg_id,
-                "reason": c.fields.get("reason", ""),
-            }
-            ign_counter += 1
-            objects.append({"type": "IgnoreSegment", "data": data})
-
     return objects, warnings
 
 
@@ -717,8 +696,6 @@ def compute_symbol_name(type_name: str, name_or_key: str, object_id: str) -> str
         prefix = "evt"
     elif type_name == "Claim":
         prefix = "claim"
-    elif type_name == "IgnoreSegment":
-        prefix = "ign"
     else:
         prefix = "obj"
 

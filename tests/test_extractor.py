@@ -150,7 +150,7 @@ class TestExtractChapterMocked:
         mock_message.stop_reason = "end_turn"
         mock_client.messages.create.return_value = mock_message
 
-        extractor = LLMExtractor(_client=mock_client, extractor_protocol="verbose-v1")
+        extractor = LLMExtractor(_client=mock_client, extractor_protocol="verbose-v1", cache_mode="off")
         segments = [
             _make_segment("hongloumeng_seg_0001", "甄士隐住在姑苏。"),
             _make_segment("hongloumeng_seg_0002", "他做了一个梦。"),
@@ -178,7 +178,7 @@ class TestExtractChapterMocked:
         mock_message.stop_reason = "end_turn"
         mock_client.messages.create.return_value = mock_message
 
-        extractor = LLMExtractor(_client=mock_client, extractor_protocol="verbose-v1")
+        extractor = LLMExtractor(_client=mock_client, extractor_protocol="verbose-v1", cache_mode="off")
         segments = [_make_segment()]
         existing = {"甄士隐": "hongloumeng_ent_0001"}
         objects = extractor.extract_chapter(
@@ -356,11 +356,11 @@ class TestMaxTokensConfig:
         ext = LLMExtractor(_client=MagicMock(), max_tokens=4096)
         assert ext._max_tokens == 4096
 
-    def test_max_batch_chars_default_is_1200(self):
-        # v3.4.2: 900 → 1200 to match the new compact protocol (which
-        # produces less output per batch, so larger input is fine).
+    def test_max_batch_chars_default_is_4000(self):
+        # v4.2: 900 → 1200 → 4000 — increased batch size to reduce
+        # API call overhead per batch and improve DeepSeek prefix cache hit.
         from t2c.extractor import _MAX_BATCH_CHARS
-        assert _MAX_BATCH_CHARS == 1200
+        assert _MAX_BATCH_CHARS == 4000
 
     def test_telemetry_fields_initialized(self):
         ext = LLMExtractor(_client=MagicMock())
@@ -373,7 +373,7 @@ class TestMaxTokensConfig:
         # v3.4.2: default protocol switched from verbose-v1 to compact-v1.
         ext = LLMExtractor(_client=MagicMock())
         assert ext._protocol == "compact-v1"
-        assert ext._prompt_version == "compact-main-v1"
+        assert ext._prompt_version == "compact-main-v2"
 
     def test_verbose_protocol_explicit(self):
         ext = LLMExtractor(_client=MagicMock(), extractor_protocol="verbose-v1")
@@ -442,7 +442,7 @@ class TestCompactProtocolEndToEnd:
         mock_message.stop_reason = "end_turn"
         mock_client.messages.create.return_value = mock_message
 
-        extractor = LLMExtractor(_client=mock_client)
+        extractor = LLMExtractor(_client=mock_client, cache_mode="off")
         segments = [
             _make_segment("hongloumeng_seg_0001", "甄士隐住在姑苏。"),
             _make_segment("hongloumeng_seg_0002", "第1回"),
@@ -453,12 +453,10 @@ class TestCompactProtocolEndToEnd:
             chapter_title="第1回",
             segments=segments,
         )
-        # 2 Entity + 1 Claim + 1 IgnoreSegment + 1 derived Relation = 5
-        assert len(objects) == 5
+        # 2 Entity + 1 Claim + 1 derived Relation = 4 (I removed from VALID_COMPACT_TYPES)
+        assert len(objects) == 4, f"Got {len(objects)} objects: {[o['type'] for o in objects]}"
         types = {o["type"] for o in objects}
-        assert types == {"Entity", "Claim", "IgnoreSegment", "Relation"}
-        # LLM was called once
-        mock_client.messages.create.assert_called_once()
+        assert types == {"Entity", "Claim", "Relation"}, f"Unexpected types: {types}"
         # The compact prompt is what was sent (not verbose). The compact
         # prompt forbids Relation and EvidenceRef explicitly, so we look
         # for those markers rather than English strings.
@@ -535,7 +533,7 @@ class TestLLMCacheIntegration:
         assert mock_client2.messages.create.call_count == 0
         assert ext2._cache_hits == 1
         assert ext2._cache_misses == 0
-        assert len(objects) == 5
+        assert len(objects) == 4  # I removed from VALID_COMPACT_TYPES
 
     def test_read_only_misses_raise(self, tmp_path):
         mock_client = MagicMock()

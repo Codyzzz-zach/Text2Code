@@ -213,16 +213,15 @@ class TestExpandCandidates:
         evt = next(o for o in objs if o["type"] == "Event")
         assert evt["data"]["participants"] == ["d_ent_0001"]
 
-    def test_expand_ignore_segment(self):
+    def test_expand_ignore_segment_removed(self):
+        """IgnoreSegment no longer expanded from compact candidates (Task 4)."""
         cands = [
             CompactCandidate(type=COMPACT_TYPE_IGNORE,
                 fields={"source_segment_ids": ["s1"], "reason": "chapter title"}),
         ]
         segs = _segs(("s1", "第1回"))
         objs, _ = expand_candidates(cands, segs, doc_id="d")
-        assert objs[0]["type"] == "IgnoreSegment"
-        assert objs[0]["data"]["segment_id"] == "s1"
-        assert objs[0]["data"]["reason"] == "chapter title"
+        assert all(o["type"] != "IgnoreSegment" for o in objs)
 
     def test_expand_id_counters_increment(self):
         cands = [
