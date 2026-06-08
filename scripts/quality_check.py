@@ -22,7 +22,7 @@ from t2c.segmenter import Segmenter
 
 
 def load_raw_text() -> str:
-    raw_path = project_root / "rawtxt" / "红楼梦.txt"
+    raw_path = project_root / "data" / "rawtxt" / "红楼梦.txt"
     return raw_path.read_text(encoding="utf-8")
 
 
