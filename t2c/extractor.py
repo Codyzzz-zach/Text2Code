@@ -171,6 +171,13 @@ COMPACT_PROMPT = """\
 - `sid` = 出现的 segment id 列表
 - `q` = 用于 EvidenceRef 定位的原文引用片段列表，可省
 
+**⚠️ 人物抽取是最优先任务：**
+- 必须提取文本中**每一个**有名字的人物（包括被称呼但未全名出现的角色）
+- 同一人物用不同称呼时，取最常用名作 `n`，其余作 `a`（如 "王熙凤"→n, ["凤姐","琏二奶奶","凤辣子"]→a）
+- "太太""奶奶""老爷""大爷"等称谓如果指向特定人物，也要提取（如 "尤氏"→E, k=person）
+- 不要遗漏对话中提到的人物（如 "那金荣...""你兄弟秦钟..."）
+- 人物的 `sid` 应包含所有提及该人物的 segment
+
 ### EV = Event（事件）
 ```json
 {{"t":"EV","n":"甄士隐做梦","k":"occurrence","p":["e1"],"sid":["hongloumeng_seg_0015"],"q":["梦"]}}
@@ -182,7 +189,7 @@ COMPACT_PROMPT = """\
 {{"t":"C","s":"e1","p":"lives_in","o":"姑苏","m":"asserted","pol":"positive","sid":["seg1"],"q":["姑苏"]}}
 ```
 - `s` = subject (entity id or lid)
-- `p` = predicate
+- `p` = predicate（使用以下受控词表之一：is_child_of, is_spouse_of, is_relative_of, is_friend_of, is_enemy_of, is_master_of, is_servant_of, is_member_of, lives_in, visits, treats, introduces, requests, informs, persuades, scolds, comforts, said, believes, knows, fears, desires, plans_to, owns, gives, receives, attends, governs, teaches, studies。如果以上都不合适，可用简洁的英文动词短语）
 - `o` = object (entity id, lid, or literal string)
 - `m` = modality (asserted/reported/claimed_by_source/uncertain/hypothetical/conditional/inferred)
 - `pol` = polarity (positive/negative)
@@ -204,11 +211,12 @@ COMPACT_PROMPT = """\
 ## 核心原则
 
 1. 同一人物用相同 lid；跨实体引用时优先用本批的 lid
-2. 不确定信息用 modality=uncertain，不要硬上 asserted
-3. 转述/对白用 reported 或 claimed_by_source
-4. `q` 给出一小段原文引用即可，程序会精确定位并算 hash
-5. `sid` 必须是输入中真实存在的 segment id
-6. 不编造，不推断，找不到的宁可不写
+2. **人物完整性优先于声明完整性**——宁可少一条 Claim，不可漏一个人物
+3. 不确定信息用 modality=uncertain，不要硬上 asserted
+4. 转述/对白用 reported 或 claimed_by_source
+5. `q` 给出一小段原文引用即可，程序会精确定位并算 hash
+6. `sid` 必须是输入中真实存在的 segment id
+7. 不编造，不推断，找不到的宁可不写
 
 请直接返回紧凑 JSON 数组。
 """
@@ -341,6 +349,8 @@ class LLMExtractor:
         self._total_input_tokens: int = 0
         self._total_output_tokens: int = 0
         self._api_elapsed_sec: float = 0.0
+        # v4.1: per-batch timing for observability
+        self._batch_timings: list[dict] = []
         # Carry over pre-existing entity map state from a previous run
         # (callers can update via _seed_entity_map).
         self._seed_entities: dict[str, str] = {}
@@ -378,6 +388,7 @@ class LLMExtractor:
         self._cache_hits = 0
         self._cache_misses = 0
         self._cache_lookups = 0
+        self._batch_timings = []
 
         # Split into batches if total text is too long
         batches = self._batch_segments(segments)
@@ -404,27 +415,55 @@ class LLMExtractor:
 
         for i, batch in enumerate(batches):
             logger.info("Ch%d batch %d/%d: %d segments", chapter_num, i + 1, len(batches), len(batch))
-            try:
-                if is_compact:
-                    objects = self._extract_batch_compact(
-                        doc_id, chapter_num, chapter_title,
-                        batch, batch_entities, batch_index=i,
-                    )
-                else:
-                    objects = self._extract_batch(
-                        doc_id, chapter_num, chapter_title, batch, batch_entities,
-                    )
-            except Exception as exc:
-                # v3.4.1: an LLM-side error (safety filter, rate limit, network) on
-                # one batch must not abort the whole chapter. Log loudly and skip.
-                logger.error(
-                    "Ch%d batch %d/%d failed: %s: %s — continuing with next batch",
-                    chapter_num, i + 1, len(batches), type(exc).__name__, exc,
-                )
-                self._last_batch_truncated = False
-                if i < len(batches) - 1:
-                    time.sleep(2)
-                continue
+            batch_t0 = time.time()
+
+            # Retry loop: up to 3 attempts with exponential backoff for
+            # transient errors (connection, rate limit, etc.).
+            max_retries = 3
+            objects: list[dict] = []
+            batch_status = "ok"
+            for attempt in range(max_retries):
+                try:
+                    if is_compact:
+                        objects = self._extract_batch_compact(
+                            doc_id, chapter_num, chapter_title,
+                            batch, batch_entities, batch_index=i,
+                        )
+                    else:
+                        objects = self._extract_batch(
+                            doc_id, chapter_num, chapter_title, batch, batch_entities,
+                        )
+                    break  # Success — exit retry loop
+                except Exception as exc:
+                    # v3.4.1: an LLM-side error (safety filter, rate limit, network) on
+                    # one batch must not abort the whole chapter. Retry with backoff.
+                    is_last_attempt = attempt == max_retries - 1
+                    if is_last_attempt:
+                        logger.error(
+                            "Ch%d batch %d/%d failed after %d attempts: %s: %s — skipping",
+                            chapter_num, i + 1, len(batches), max_retries,
+                            type(exc).__name__, exc,
+                        )
+                        self._last_batch_truncated = False
+                        batch_status = f"failed: {type(exc).__name__}"
+                    else:
+                        backoff = 2 ** (attempt + 1)  # 2s, 4s, 8s
+                        logger.warning(
+                            "Ch%d batch %d/%d attempt %d/%d failed: %s: %s — retrying in %ds",
+                            chapter_num, i + 1, len(batches), attempt + 1, max_retries,
+                            type(exc).__name__, exc, backoff,
+                        )
+                        time.sleep(backoff)
+                        continue
+
+            batch_elapsed = time.time() - batch_t0
+            self._batch_timings.append({
+                "batch_index": i + 1,
+                "segment_count": len(batch),
+                "object_count": len(objects),
+                "elapsed_sec": round(batch_elapsed, 2),
+                "status": batch_status,
+            })
             all_objects.extend(objects)
             if self._last_batch_truncated:
                 truncated_batches += 1

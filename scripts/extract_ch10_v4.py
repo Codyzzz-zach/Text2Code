@@ -223,6 +223,8 @@ def collect_cqm_metrics(
             "repair_attempts": result.repair_attempts,
             "errors_count": len(result.errors),
             "warnings_count": len(result.warnings),
+            "phase_timings": result.phase_timings,
+            "batch_timings": result.batch_timings,
         },
         "llm_telemetry": {
             "total_input_tokens": result.total_input_tokens,
@@ -366,6 +368,24 @@ def main() -> int:
     print(f"  Errors:   {len(result.errors)}")
     print(f"  Warnings: {len(result.warnings)}")
     print(f"  Elapsed:  {elapsed:.1f}s")
+
+    # Phase timings breakdown
+    if result.phase_timings:
+        print()
+        print("Phase timings:")
+        total_phase = sum(result.phase_timings.values())
+        for phase_name, phase_sec in result.phase_timings.items():
+            pct = phase_sec / total_phase * 100 if total_phase > 0 else 0
+            print(f"  {phase_name:30s} {phase_sec:6.2f}s ({pct:5.1f}%)")
+        print(f"  {'TOTAL':30s} {total_phase:6.2f}s")
+
+    # Per-batch timings
+    if result.batch_timings:
+        print()
+        print("Batch timings:")
+        for bt in result.batch_timings:
+            print(f"  batch {bt['batch_index']}: {bt['segment_count']} segs → {bt['object_count']} objs, "
+                  f"{bt['elapsed_sec']:.1f}s [{bt['status']}]")
 
     _print_telemetry(result, cfg.model)
 

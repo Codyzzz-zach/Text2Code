@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import time
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -36,6 +37,10 @@ class PipelineResult:
     total_input_tokens: int = 0
     total_output_tokens: int = 0
     api_elapsed_sec: float = 0.0
+    # v4.1: per-phase timing for observability
+    phase_timings: dict[str, float] = field(default_factory=dict)
+    # v4.1: per-batch timing from extractor
+    batch_timings: list[dict] = field(default_factory=list)
 
 
 class Pipeline:
@@ -79,17 +84,23 @@ class Pipeline:
         10. Generate raw fallback Residual for unrepairable segments
         """
         result = PipelineResult()
+        timings: dict[str, float] = {}
 
         # Step 1: Ingest text into corpus
+        t0 = time.time()
         corpus = CorpusManager()
         doc, stored_text = corpus.ingest_text(raw_text, doc_id, source_path)
         logger.info("Ingested document %s (%d chars)", doc_id, len(raw_text))
+        timings["1_ingest"] = time.time() - t0
 
         # Step 2: Create blocks
+        t0 = time.time()
         blocks = corpus.create_blocks(doc, raw_text)
         logger.info("Created %d blocks for %s", len(blocks), doc_id)
+        timings["2_block_generation"] = time.time() - t0
 
         # Step 3: Segment each block
+        t0 = time.time()
         segmenter = Segmenter()
         all_segments: list[Segment] = []
         for block in blocks:
@@ -97,18 +108,23 @@ class Pipeline:
             segs = segmenter.segment_block(doc_id, block, block_text)
             all_segments.extend(segs)
         logger.info("Segmented %s into %d segments", doc_id, len(all_segments))
+        timings["3_segmentation"] = time.time() - t0
 
         # Save document and segments to store
+        t0 = time.time()
         self._store.save(doc)
         for seg in all_segments:
             self._store.save(seg)
+        timings["3b_store_segments"] = time.time() - t0
 
         # Step 4: Extract (if extractor available)
         if self._extractor is None:
             logger.warning("No extractor configured - skipping candidate extraction")
             result.warnings.append("No extractor configured")
+            result.phase_timings = timings
             return result
 
+        t0 = time.time()
         objects = self._extractor.extract_chapter(
             doc_id=doc_id,
             chapter_num=chapter_num,
@@ -121,9 +137,13 @@ class Pipeline:
         result.total_input_tokens = getattr(self._extractor, "_total_input_tokens", 0)
         result.total_output_tokens = getattr(self._extractor, "_total_output_tokens", 0)
         result.api_elapsed_sec = getattr(self._extractor, "_api_elapsed_sec", 0.0)
+        # v4.1: capture per-batch timings from extractor
+        result.batch_timings = getattr(self._extractor, "_batch_timings", [])
         logger.info("Extracted %d candidate objects", len(objects))
+        timings["4_llm_extraction"] = time.time() - t0
 
         # Step 5: Validate (with raw_text for evidence checks)
+        t0 = time.time()
         self._store.set_raw_text(doc_id, raw_text)
         validator = Validator(
             raw_text_store={doc_id: raw_text},
@@ -132,8 +152,10 @@ class Pipeline:
         val_result = validator.validate_objects(objects)
         result.errors = val_result.errors
         result.warnings = val_result.warnings
+        timings["5_validation"] = time.time() - t0
 
         # Step 6: Repair loop
+        t0 = time.time()
         repair_attempts = 0
         while not val_result.valid and repair_attempts < self._max_repair:
             repair_attempts += 1
@@ -146,32 +168,49 @@ class Pipeline:
 
         result.repair_attempts = repair_attempts
         result.valid = val_result.valid
+        timings["6_repair"] = time.time() - t0
 
         # Step 7: Validate schema + construct models
+        t0 = time.time()
         models: list = []
         if objects:
             sv = SchemaValidator()
             models, _ = sv.validate_and_construct(objects)
+        timings["7_schema_construct"] = time.time() - t0
 
         # Step 8: Generate code from validated models
+        t0 = time.time()
         if models:
             codegen = CodeGenerator()
             result.code = codegen.generate_knowledge_code(models)
+        timings["8_code_generation"] = time.time() - t0
 
         # Step 9: Save valid objects to store (with validation gate)
+        t0 = time.time()
         if models:
             saved_count, val_errors = self._store.save_validated_batch(models)
             result.saved_count = saved_count
             result.rejected_count = len(models) - saved_count
+        timings["9_store_save"] = time.time() - t0
 
         # Step 10: Raw fallback for uncovered segments.
         # v4.0: always run — uncovers silent loss even when validation passed.
         # The internal logic distinguishes "validation error" (high importance)
         # from "uncovered" (medium importance) and labels accordingly.
+        t0 = time.time()
         raw_fallback_ids = self._generate_raw_fallbacks(
             objects, all_segments, doc_id, val_result.errors
         )
         result.raw_fallback_segment_ids = raw_fallback_ids
+        timings["10_raw_fallback"] = time.time() - t0
+
+        result.phase_timings = timings
+        # Log the full timing breakdown
+        total = sum(timings.values())
+        logger.info("Phase timings (%.2fs total):", total)
+        for phase_name, phase_sec in timings.items():
+            pct = phase_sec / total * 100 if total > 0 else 0
+            logger.info("  %-30s %6.2fs (%5.1f%%)", phase_name, phase_sec, pct)
 
         return result
 
@@ -309,11 +348,13 @@ class Pipeline:
             seg = seg_map.get(seg_id)
             if seg is None:
                 continue
+            text = getattr(seg, "text_slice", "")
+            # v4.1: classify residuals by content characteristics instead of
+            # using a single "structural" template for all. This gives the
+            # coverage report diagnostic value and makes Residual entropy > 0.
             if seg_id in uncovered_seg_ids:
                 # Silent loss: no object ever referenced this segment.
-                importance = "medium"
-                category = "structural"
-                reason = "Segment has no semantic object, no Residual, no Ignore — silent loss marker"
+                category, importance, reason = self._classify_residual_text(text)
             else:
                 # Validation error forced fallback.
                 importance = "high"
@@ -334,3 +375,50 @@ class Pipeline:
                 self._store.save(m)
 
         return list(fallback_seg_ids)
+
+    @staticmethod
+    def _classify_residual_text(text: str) -> tuple[str, str, str]:
+        """Classify a segment's text to determine Residual category and importance.
+
+        Returns (category, importance, reason). Uses content heuristics to
+        differentiate between dialogue, description, transition, and other
+        segment types — giving the coverage report diagnostic value.
+        """
+        # Dialogue detection: Chinese dialogue markers 「」『』"" or
+        # English-style quoted speech
+        has_dialogue = any(m in text for m in ("「", "」", "『", "』", "「", "」"))
+        # Also check for common Chinese dialogue patterns like "说道：..."
+        has_speech = any(w in text for w in ("说道", "道：", "笑道", "叹道", "哭道", "骂道", "叫道", "问道", "答道"))
+
+        # Named entity detection: common Chinese name patterns
+        has_names = any(w in text for w in ("太太", "奶奶", "老爷", "大爷", "姑娘", "小姐", "嫂子", "婶子", "嫂嫂"))
+
+        # Transition/background detection: short segments or narrative connectors
+        is_short = len(text) < 20
+        has_transition = any(w in text for w in ("于是", "随后", "接着", "次日", "过了", "一日", "那日"))
+
+        # Description detection: adjectives, scenery, atmosphere
+        has_description = any(w in text for w in ("只见", "但见", "原来", "只见那", "好一个", "果然"))
+
+        if has_dialogue or has_speech:
+            category = "interpersonal"
+            importance = "high"
+            reason = "Dialogue segment not covered by semantic objects — contains character speech"
+        elif has_names and not is_short:
+            category = "interpersonal"
+            importance = "high"
+            reason = "Segment mentions named characters but lacks structured extraction"
+        elif has_description:
+            category = "stylistic"
+            importance = "medium"
+            reason = "Descriptive/atmospheric content not captured in structured objects"
+        elif has_transition or is_short:
+            category = "structural"
+            importance = "medium"
+            reason = "Transition or short narrative connector — low extraction priority"
+        else:
+            category = "structural"
+            importance = "medium"
+            reason = "Segment not covered by semantic objects"
+
+        return category, importance, reason
