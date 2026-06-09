@@ -158,6 +158,7 @@ def run_profile(profile: str, extra_pytest_args: list[str]) -> TestRun:
             "grounding_rate_min": 0.70,
             "reference_issue_max": 10,
             "entity_conflict_max": 5,
+            "coverage_rate_observe": 0.35,
         }
 
         proc = subprocess.run(
@@ -214,6 +215,7 @@ def run_profile(profile: str, extra_pytest_args: list[str]) -> TestRun:
         gr = metrics.get("grounding_rate", 0)
         ri = metrics.get("reference_issue_count", 999)
         ec = metrics.get("entity_conflict_count", 999)
+        cov = metrics.get("coverage_rate", 0)
 
         if gr < quality_thresholds["grounding_rate_min"]:
             failures.append(f"grounding_rate {gr:.2%} < {quality_thresholds['grounding_rate_min']:.0%}")
@@ -232,10 +234,19 @@ def run_profile(profile: str, extra_pytest_args: list[str]) -> TestRun:
             combined += "FAILURES:\n" + "\n".join(failures) + "\n"
         else:
             combined += "All thresholds met.\n"
+        combined += (
+            f"Coverage observe: {cov:.2%} "
+            f"(target next: {quality_thresholds['coverage_rate_observe']:.0%}; not hard-gated yet)\n"
+        )
 
         return TestRun(
             profile=profile,
-            purpose=f"Quality gate: grounding≥{quality_thresholds['grounding_rate_min']:.0%}, refs≤{quality_thresholds['reference_issue_max']}, conflicts≤{quality_thresholds['entity_conflict_max']}.",
+            purpose=(
+                f"Quality gate: grounding≥{quality_thresholds['grounding_rate_min']:.0%}, "
+                f"refs≤{quality_thresholds['reference_issue_max']}, "
+                f"conflicts≤{quality_thresholds['entity_conflict_max']}; "
+                "coverage observed."
+            ),
             status=status,
             returncode=returncode,
             duration_seconds=round(duration, 2),

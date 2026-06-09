@@ -10,8 +10,8 @@ Public API:
     LLMConfig.custom(provider=..., ...)   # any other OpenAI-compatible endpoint
 
 Usage:
-    cfg = LLMConfig.minimax()             # uses env if no key passed
-    extractor = LLMExtractor(config=cfg)  # (next step: plumb into extractor)
+    cfg = LLMConfig.from_env()            # DeepSeek v4 flash by default
+    extractor = LLMExtractor(config=cfg)
 
 Resolution order for `from_env`:
     1. explicit kwargs
@@ -31,6 +31,11 @@ from typing import Any
 
 # Provider presets — known base URLs and default model names.
 # Add new providers here; the LLMConfig dataclass is provider-agnostic.
+DEFAULT_LLM_PROVIDER = "deepseek"
+DEFAULT_CACHE_MODE = "read_write"
+DEFAULT_CACHE_DIR = ".t2c_cache"
+DEFAULT_EXTRACTOR_PROTOCOL = "compact-v1"
+
 _PROVIDER_PRESETS: dict[str, dict[str, str]] = {
     "minimax": {
         "base_url": "https://api.minimaxi.com/anthropic",
@@ -53,6 +58,8 @@ _PROVIDER_PRESETS: dict[str, dict[str, str]] = {
         "api_key_env": "DEEPSEEK_API_KEY",
     },
 }
+
+DEFAULT_LLM_MODEL = _PROVIDER_PRESETS[DEFAULT_LLM_PROVIDER]["default_model"]
 
 
 def _load_dotenv(path: Path) -> None:
@@ -95,7 +102,7 @@ class LLMConfig:
     fill in the gaps from the environment and provider defaults.
     """
 
-    provider: str = "anthropic"
+    provider: str = DEFAULT_LLM_PROVIDER
     model: str = ""
     base_url: str = ""
     api_key: str = ""
@@ -170,6 +177,10 @@ class LLMConfig:
         cache hits on shared prompt prefixes.
         """
         preset = _PROVIDER_PRESETS["deepseek"]
+        kwargs.setdefault("thinking_budget", 0)
+        kwargs.setdefault("cache_mode", DEFAULT_CACHE_MODE)
+        kwargs.setdefault("cache_dir", DEFAULT_CACHE_DIR)
+        kwargs.setdefault("extractor_protocol", DEFAULT_EXTRACTOR_PROTOCOL)
         return cls(
             provider="deepseek",
             model=model or preset["default_model"],
@@ -215,18 +226,18 @@ class LLMConfig:
             T2C_LLM_PROMPT_VERSION
 
         If `provider` is not set anywhere, the factory falls back to
-        `minimax` (the project's default test endpoint).
+        `deepseek` / `deepseek-v4-flash`, the product default LLM entry.
         """
         # Load .env first so os.environ is populated
         env_path = Path(env_file) if env_file else _find_env_file()
         if env_path is not None:
             _load_dotenv(env_path)
 
-        # Resolution order: explicit kwarg > env var > default "minimax".
+        # Resolution order: explicit kwarg > env var > product default.
         if provider is not None:
             env_provider = provider
         else:
-            env_provider = os.environ.get("T2C_LLM_PROVIDER") or "minimax"
+            env_provider = os.environ.get("T2C_LLM_PROVIDER") or DEFAULT_LLM_PROVIDER
         env_model = os.environ.get("T2C_LLM_MODEL")
         env_base_url = os.environ.get("T2C_LLM_BASE_URL")
         env_api_key = os.environ.get("T2C_LLM_API_KEY")
@@ -272,6 +283,18 @@ class LLMConfig:
         if (pv := os.environ.get("T2C_LLM_PROMPT_VERSION")):
             cfg.prompt_version = pv
 
+        # Product defaults: real extraction should be compact and cacheable
+        # unless the caller explicitly opts out. DeepSeek flash does not use
+        # a thinking budget in the default path.
+        if cfg.cache_mode is None:
+            cfg.cache_mode = DEFAULT_CACHE_MODE
+        if cfg.cache_dir is None:
+            cfg.cache_dir = DEFAULT_CACHE_DIR
+        if cfg.extractor_protocol is None:
+            cfg.extractor_protocol = DEFAULT_EXTRACTOR_PROTOCOL
+        if cfg.provider == "deepseek" and cfg.thinking_budget is None:
+            cfg.thinking_budget = 0
+
         # Finally: explicit overrides win. Include `provider` in overrides
         # so the Special-case block below can detect an explicit provider
         # switch (since `provider=...` is a named parameter that doesn't
@@ -301,12 +324,17 @@ class LLMConfig:
         """Build a config from a plain dict (e.g. loaded from YAML/TOML)."""
         data = dict(data)  # copy
         # Resolve provider preset
-        provider = data.pop("provider", "minimax")
+        provider = data.pop("provider", DEFAULT_LLM_PROVIDER)
         model = data.pop("model", None)
         base_url = data.pop("base_url", None)
         api_key = data.pop("api_key", None)
         if provider in _PROVIDER_PRESETS:
             preset = _PROVIDER_PRESETS[provider]
+            if provider == "deepseek":
+                data.setdefault("thinking_budget", 0)
+                data.setdefault("cache_mode", DEFAULT_CACHE_MODE)
+                data.setdefault("cache_dir", DEFAULT_CACHE_DIR)
+                data.setdefault("extractor_protocol", DEFAULT_EXTRACTOR_PROTOCOL)
             return cls(
                 provider=provider,
                 model=model or preset["default_model"],
@@ -343,4 +371,12 @@ class LLMConfig:
         )
 
 
-__all__ = ["LLMConfig", "_PROVIDER_PRESETS"]
+__all__ = [
+    "LLMConfig",
+    "_PROVIDER_PRESETS",
+    "DEFAULT_LLM_PROVIDER",
+    "DEFAULT_LLM_MODEL",
+    "DEFAULT_CACHE_MODE",
+    "DEFAULT_CACHE_DIR",
+    "DEFAULT_EXTRACTOR_PROTOCOL",
+]

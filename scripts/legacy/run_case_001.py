@@ -1,4 +1,4 @@
-"""End-to-end demo: case_001.txt → examples/knowledge/case_001/.
+"""Legacy deterministic demo: case_001.txt → examples/knowledge/case_001/.
 
 This script is the v4.0 end-to-end entry. It:
   1. Ingests raw text via CorpusManager
@@ -8,14 +8,14 @@ This script is the v4.0 end-to-end entry. It:
   5. Reports file sizes
 
 Run:
-  $ .venv/bin/python3 examples/run_case_001.py
+  $ .venv/bin/python3 scripts/legacy/run_case_001.py
 """
 from __future__ import annotations
 
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from t2c.compile_target import compile_to_knowledge_code
 from t2c.corpus import CorpusManager
@@ -41,7 +41,7 @@ def sha(text: str) -> str:
 
 
 def main() -> int:
-    project_root = Path(__file__).resolve().parent.parent
+    project_root = Path(__file__).resolve().parents[2]
     raw_path = project_root / "examples" / "corpus" / "case_001.txt"
     output_dir = project_root / "examples" / "knowledge" / "case_001"
 

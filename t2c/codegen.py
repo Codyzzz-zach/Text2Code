@@ -941,14 +941,6 @@ class CodeGenerator:
         files["text.py"] = text_files["text.py"]
 
         # Build the cross-file symbol index from text.py.
-        # Parse text.py to extract Document/Block/Segment symbols.
-        text_parser_symbols: dict[str, str] = {}  # {segment_id: symbol_name}
-        for sym_name, type_name in _scan_symbols(files["text.py"]):
-            if type_name == "Segment":
-                # We need segment_id; pull it from the source.
-                # _scan_symbols returns (symbol, type); we re-scan the source.
-                pass
-        # Re-parse text.py to get segment_id → symbol mapping
         text_source = files["text.py"]
         seg_id_to_sym = _extract_segment_id_symbol_map(text_source)
 
@@ -972,6 +964,12 @@ class CodeGenerator:
             )
             for sym in _scan_top_level_symbols(files["entities.py"]):
                 all_symbols[sym] = ".entities"
+        else:
+            files["entities.py"] = self._generate_type_file_v33(
+                [], {}, ["Entity", "EvidenceRef"],
+                external_symbols=seg_id_to_sym,
+                external_modules={".text"},
+            )
 
         # --- events.py ---
         if events:
@@ -987,6 +985,12 @@ class CodeGenerator:
             )
             for sym in _scan_top_level_symbols(files["events.py"]):
                 all_symbols[sym] = ".events"
+        else:
+            files["events.py"] = self._generate_type_file_v33(
+                [], {}, ["Event", "EvidenceRef"],
+                external_symbols=seg_id_to_sym,
+                external_modules={".text"},
+            )
 
         # --- claims.py ---
         if claims:
@@ -1002,6 +1006,12 @@ class CodeGenerator:
             )
             for sym in _scan_top_level_symbols(files["claims.py"]):
                 all_symbols[sym] = ".claims"
+        else:
+            files["claims.py"] = self._generate_type_file_v33(
+                [], {}, ["Claim", "EvidenceRef"],
+                external_symbols=seg_id_to_sym,
+                external_modules={".text", ".entities"},
+            )
 
         # --- residuals.py (Residual + IgnoreSegment) ---
         if residuals or ignores:
@@ -1018,6 +1028,12 @@ class CodeGenerator:
             )
             for sym in _scan_top_level_symbols(files["residuals.py"]):
                 all_symbols[sym] = ".residuals"
+        else:
+            files["residuals.py"] = self._generate_type_file_v33(
+                [], {}, ["Residual", "IgnoreSegment", "EvidenceRef"],
+                external_symbols=seg_id_to_sym,
+                external_modules={".text"},
+            )
 
         # --- derived.py (Relation) ---
         if relations:
@@ -1035,12 +1051,88 @@ class CodeGenerator:
             )
             for sym in _scan_top_level_symbols(files["derived.py"]):
                 all_symbols[sym] = ".derived"
+        else:
+            files["derived.py"] = self._generate_type_file_v33(
+                [], {}, ["Relation", "EvidenceRef"],
+                external_symbols=seg_id_to_sym,
+                external_modules={".text", ".entities", ".claims"},
+            )
 
         # --- coverage.py ---
-        if coverage_report:
-            files["coverage.py"] = self.generate_coverage_code(coverage_report)
+        if coverage_report is None:
+            coverage_report = self._derive_static_coverage_report(
+                doc=doc,
+                segments=list(segments),
+                semantic_objects=[
+                    *list(entities or []),
+                    *list(events or []),
+                    *list(claims or []),
+                    *list(relations or []),
+                ],
+                residuals=list(residuals or []),
+                ignores=list(ignores or []),
+            )
+        files["coverage.py"] = self.generate_coverage_code(coverage_report)
 
         # --- __init__.py ---
         files["__init__.py"] = self.generate_init_py(all_symbols)
 
         return files
+
+    @staticmethod
+    def _derive_static_coverage_report(
+        *,
+        doc: Document,
+        segments: list[Segment],
+        semantic_objects: list[BaseModel],
+        residuals: list[Residual],
+        ignores: list[IgnoreSegment],
+    ) -> CoverageReport:
+        """Derive a conservative static CoverageReport when caller omitted one."""
+        referenced: set[str] = set()
+        for obj in semantic_objects:
+            for sid in getattr(obj, "source_segment_ids", []) or []:
+                referenced.add(sid)
+            for eref in getattr(obj, "evidence_refs", []) or []:
+                sid = getattr(eref, "segment_id", None)
+                if sid:
+                    referenced.add(sid)
+
+        residual_by_segment: dict[str, list[Residual]] = {}
+        for residual in residuals:
+            residual_by_segment.setdefault(residual.segment_id, []).append(residual)
+        ignored = {ignore.segment_id for ignore in ignores}
+
+        status_counts = {"covered": 0, "partial": 0, "raw_only": 0, "ignored": 0, "uncovered": 0}
+        requires_raw_fallback: list[str] = []
+
+        for segment in segments:
+            sid = segment.id
+            has_semantic = sid in referenced
+            has_residual = sid in residual_by_segment
+            if sid in ignored:
+                status = "ignored"
+            elif has_semantic and not has_residual:
+                status = "covered"
+            elif has_semantic and has_residual:
+                status = "partial"
+            elif not has_semantic and has_residual:
+                status = "raw_only"
+            else:
+                status = "uncovered"
+            status_counts[status] += 1
+
+            if status in ("partial", "raw_only", "uncovered"):
+                requires_raw_fallback.append(sid)
+                continue
+            if any(res.importance == "high" for res in residual_by_segment.get(sid, [])):
+                requires_raw_fallback.append(sid)
+
+        return CoverageReport(
+            id=f"{doc.id}_coverage",
+            doc_id=doc.id,
+            total_segments=len(segments),
+            status_counts=status_counts,
+            requires_raw_fallback=requires_raw_fallback,
+            generated_at=doc.created_at,
+        )

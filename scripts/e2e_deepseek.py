@@ -9,7 +9,7 @@ from t2c.corpus import CorpusManager
 from t2c.segmenter import Segmenter
 
 cfg = LLMConfig.from_env()
-extractor = LLMExtractor(config=cfg, cache_mode="refresh")
+extractor = LLMExtractor(config=cfg)
 
 raw_path = os.path.join(PROJ_ROOT, "data/rawtxt/红楼梦.txt")
 raw_text = open(raw_path, encoding="utf-8").read()

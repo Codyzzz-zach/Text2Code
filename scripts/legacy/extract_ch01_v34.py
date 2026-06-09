@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""Extract semantic objects for 红楼梦 chapter 1 using the v3.4 Pipeline.
+"""Legacy v3.4 extraction script for 红楼梦 chapter 1.
 
 This script demonstrates the v3.4 near-lossless candidate flow:
   Segment → Extract → Validate → Repair loop → Schema construct
-  → Codegen → Save validated → Raw fallback (for unrepairable segments).
+  → Save validated → Raw fallback (for unrepairable segments).
 
-It writes the result to examples/knowledge/hongloumeng_ch01.knowledge.t2c.py
-and reports on object counts, validation issues, and raw-fallback coverage.
+It no longer writes product Knowledge Code. Use `t2c compile ... --llm`
+for the current product path.
 """
 from __future__ import annotations
 
@@ -27,10 +27,9 @@ os.environ.setdefault("T2C_CACHE_MODE", "read_write")
 os.environ.setdefault("T2C_CACHE_DIR", ".t2c_cache")
 
 # Add project root to path
-project_root = Path(__file__).resolve().parent.parent
+project_root = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(project_root))
 
-from t2c.codegen import CodeGenerator
 from t2c.extractor import LLMExtractor
 from t2c.object_store import ObjectStore
 from t2c.pipeline import Pipeline
@@ -92,7 +91,7 @@ def _print_telemetry(result) -> None:
 
 
 def main() -> int:
-    raw_path = project_root / "rawtxt" / "红楼梦.txt"
+    raw_path = project_root / "data" / "rawtxt" / "红楼梦.txt"
     output_dir = project_root / "examples" / "knowledge"
 
     if not raw_path.exists():
@@ -155,21 +154,6 @@ def main() -> int:
         t = obj.get("type", "Unknown")
         type_counts[t] = type_counts.get(t, 0) + 1
 
-    # Saved count by type (from objects, since models list is internal)
-    saved_counts: dict[str, int] = {}
-    rejected_counts: dict[str, int] = {}
-    if result.code:
-        # Re-parse the code to count saved objects
-        from t2c.parser import T2CParser
-        parser = T2CParser()
-        try:
-            saved = parser.parse_string(result.code)
-            for obj in saved:
-                t = obj.get("type", "Unknown")
-                saved_counts[t] = saved_counts.get(t, 0) + 1
-        except Exception as exc:  # pragma: no cover
-            logger.warning("Failed to parse generated code: %s", exc)
-
     print()
     print("=" * 60)
     print(f"v3.4 Pipeline result for 第{chapter_num}回: {title}")
@@ -196,27 +180,9 @@ def main() -> int:
             print(f"    FALLBACK: {seg_id}")
     print()
 
-    # Write the .t2c.py knowledge file
-    out_path = output_dir / "hongloumeng_ch01.knowledge.t2c.py"
-    if result.code:
-        out_path.write_text(result.code, encoding="utf-8")
-        print(f"Written: {out_path} ({out_path.stat().st_size:,} bytes)")
-    else:
-        print("No code generated (pipeline returned no models).")
-        return 1
-
-    # Quick parse-back check
-    from t2c.parser import T2CParser
-    parser = T2CParser()
-    try:
-        parsed = parser.parse_file(out_path)
-        print(f"Parse-back check: {len(parsed)} objects recovered")
-        for t, c in sorted(type_counts.items()):
-            actual = sum(1 for o in parsed if o.get("type") == t)
-            print(f"    {t}: {actual} parsed back")
-    except Exception as exc:  # pragma: no cover
-        print(f"Parse-back FAILED: {exc}")
-        return 1
+    print("This legacy v3.4 script no longer writes Knowledge Code directly.")
+    print("Use the product CLI instead:")
+    print("  t2c compile data/rawtxt/红楼梦.txt --output examples/knowledge/hongloumeng/ch01 --llm")
 
     logger.info("=== v3.4 ch01 extraction done: %d candidates, %d saved, %d errors ===",
                 len(result.objects), result.saved_count, len(result.errors))

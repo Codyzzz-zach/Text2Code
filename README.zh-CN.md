@@ -136,7 +136,8 @@ claim_ent0006_at_ent0002 = Claim(id='hlm_clm_0001',
 ### 前置条件
 
 - Python 3.11+
-- LLM API Key（MiniMax、Anthropic 或 OpenAI 兼容端点）
+- 完整抽取需要 LLM API Key。默认入口是 DeepSeek `deepseek-v4-flash`；
+  不使用 LLM 的编译不需要 Key。
 
 ### 安装
 
@@ -157,13 +158,14 @@ pip install -e ".[dev]"
 
 ```bash
 cp .env.example .env
-# 编辑 .env — 填入 API Key 和提供商
+# 编辑 .env — 填入 T2C_LLM_API_KEY 或 DEEPSEEK_API_KEY
 ```
 
 支持的提供商：
 
 | 提供商 | 环境变量 | 默认模型 |
 |:-------|:---------|:---------|
+| DeepSeek | `T2C_LLM_PROVIDER=deepseek` | `deepseek-v4-flash` |
 | MiniMax | `T2C_LLM_PROVIDER=minimax` | `MiniMax-M3` |
 | Anthropic | `T2C_LLM_PROVIDER=anthropic` | `claude-3-5-sonnet` |
 | OpenAI 兼容 | `T2C_LLM_PROVIDER=openai` | `gpt-4o` |
@@ -175,20 +177,27 @@ cp .env.example .env
 <!-- 使用方法 -->
 ## 使用方法
 
-### 快速演示（无需 LLM）
+### 文本映射预检（无需 LLM）
 
 ```bash
-python examples/run_case_001.py
+t2c compile examples/corpus/case_001.txt \
+  --output examples/knowledge/case_001 \
+  --text-only
 ```
 
-使用硬编码实体在一段中文侦探片段上运行端到端演示。
+这只会生成可回放的 text map 包，用于低成本预检；它不是完整语义转写。
 
 ### 使用 LLM 完整提取
 
 ```bash
-# 提取红楼梦第一章
-python scripts/extract_ch01_v4.py
+t2c compile data/rawtxt/红楼梦.txt \
+  --output examples/knowledge/hongloumeng/full \
+  --llm \
+  --cache-mode read_write
 ```
+
+日常复跑用 `--cache-mode read_only`；只有明确需要重新付费调用模型时才用
+`refresh`。
 
 ### 运行测试
 
@@ -209,6 +218,7 @@ pytest -x -q                      # 遇到第一个失败即停止
 Text2Code/
 ├── t2c/                        # 核心引擎
 │   ├── pipeline.py             # 流水线编排
+│   ├── cli.py                  # 公开 t2c compile 入口
 │   ├── extractor.py            # LLM 提取器（compact-v1 协议）
 │   ├── codegen.py              # 知识代码生成
 │   ├── compile_target.py       # 多文件编译
@@ -229,9 +239,9 @@ Text2Code/
 │   └── object_store.py         # SQLite 对象存储
 ├── tests/                      # 测试套件（411 个测试）
 ├── scripts/                    # 提取脚本与工具
-├── examples/                   # 示例语料与运行脚本
+├── examples/                   # 示例语料与生成包
 │   ├── corpus/                 # 原始文本样本
-│   └── knowledge/              # 输出目录（.t2c.py 由脚本生成）
+│   └── knowledge/              # 输出目录（.t2c.py 由 t2c compile 生成）
 ├── data/                       # 大型数据文件
 │   ├── rawtxt/                 # 完整源文本
 │   └── generated/              # LLM 生成的大文件

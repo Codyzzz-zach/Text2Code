@@ -17,7 +17,7 @@ import time
 from pathlib import Path
 
 # Add project root to path
-project_root = Path(__file__).resolve().parent.parent
+project_root = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(project_root))
 
 from t2c.codegen import CodeGenerator
@@ -73,7 +73,7 @@ def _print_telemetry(result, model: str) -> None:
 
 
 def main() -> int:
-    raw_path = project_root / "rawtxt" / "红楼梦.txt"
+    raw_path = project_root / "data" / "rawtxt" / "红楼梦.txt"
     output_dir = project_root / "examples" / "knowledge" / "hongloumeng" / "ch01"
     log_path = output_dir / "extraction_ch01_v4.log"
 

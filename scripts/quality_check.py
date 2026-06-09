@@ -74,6 +74,57 @@ def parse_knowledge_file(path: Path) -> dict[str, list]:
     return {"entities": entities, "events": events, "claims": claims, "relations": relations}
 
 
+def parse_knowledge_package(path: Path) -> dict[str, list]:
+    """Parse a v4 multi-file Knowledge Code package.
+
+    The current product output is a directory containing text.py,
+    entities.py, events.py, claims.py, derived.py, residuals.py, coverage.py.
+    Quality checks must evaluate that product surface before falling back
+    to legacy single-file `.knowledge.t2c.py` artifacts.
+    """
+    from t2c.schema import SchemaValidator
+
+    raw_objects: list[dict] = []
+    for filename in ("text.py", "entities.py", "events.py", "claims.py", "derived.py"):
+        fpath = path / filename
+        if not fpath.exists():
+            continue
+        parser = T2CParser()
+        raw_objects.extend(parser.parse_string(fpath.read_text(encoding="utf-8")))
+
+    sv = SchemaValidator()
+    segments, _ = sv.validate_and_construct([o for o in raw_objects if o.get("type") == "Segment"])
+    entities, _ = sv.validate_and_construct([o for o in raw_objects if o.get("type") == "Entity"])
+    events, _ = sv.validate_and_construct([o for o in raw_objects if o.get("type") == "Event"])
+    claims, _ = sv.validate_and_construct([o for o in raw_objects if o.get("type") == "Claim"])
+    relations, _ = sv.validate_and_construct([o for o in raw_objects if o.get("type") == "Relation"])
+
+    return {
+        "segments": segments,
+        "entities": entities,
+        "events": events,
+        "claims": claims,
+        "relations": relations,
+    }
+
+
+def find_v4_packages(output_dir: Path) -> dict[int, Path]:
+    """Return {chapter_num: package_path} for current v4 Hongloumeng output."""
+    root = output_dir / "hongloumeng"
+    if not root.exists():
+        return {}
+    packages: dict[int, Path] = {}
+    for child in sorted(root.iterdir()):
+        if not child.is_dir():
+            continue
+        m = re.fullmatch(r"ch(\d+)", child.name)
+        if not m:
+            continue
+        if (child / "text.py").exists():
+            packages[int(m.group(1))] = child
+    return packages
+
+
 def check_grounding(
     objects: dict[str, list],
     seg_map: dict[str, str],
@@ -268,17 +319,29 @@ def run_quality_check(json_output: bool = False, fail_under: float | None = None
 
     output_dir = project_root / "examples" / "knowledge"
 
-    chapter_nums = [1, 2, 3]
     chapter_objects: dict[int, dict[str, list]] = {}
+    chapter_seg_maps: dict[int, dict[str, str]] = {}
     all_issues: list[dict] = []
     all_entity_ids: set[str] = set()
 
-    # First pass: parse all chapter knowledge files to build all_entity_ids
+    v4_packages = find_v4_packages(output_dir)
+    if v4_packages:
+        chapter_nums = sorted(v4_packages)
+        _p(f"Using v4 Knowledge Code packages: {', '.join('ch%02d' % n for n in chapter_nums)}")
+    else:
+        chapter_nums = [1, 2, 3]
+        _p("Using legacy single-file knowledge artifacts")
+
+    # First pass: parse all chapter knowledge to build all_entity_ids.
     for ch_num in chapter_nums:
-        kf = output_dir / f"hongloumeng_ch{ch_num:02d}.knowledge.t2c.py"
-        if not kf.exists():
-            continue
-        objects = parse_knowledge_file(kf)
+        if v4_packages:
+            objects = parse_knowledge_package(v4_packages[ch_num])
+            chapter_seg_maps[ch_num] = {s.id: s.text_slice for s in objects.get("segments", [])}
+        else:
+            kf = output_dir / f"hongloumeng_ch{ch_num:02d}.knowledge.t2c.py"
+            if not kf.exists():
+                continue
+            objects = parse_knowledge_file(kf)
         chapter_objects[ch_num] = objects
         all_entity_ids.update(e.id for e in objects["entities"])
 
@@ -288,18 +351,24 @@ def run_quality_check(json_output: bool = False, fail_under: float | None = None
             _p(f"\n  WARNING: Ch{ch_num} knowledge file not found, skipping")
             continue
 
-        ch_info = None
-        for num, title, start, end in boundaries:
-            if num == ch_num:
-                ch_info = (num, title, start, end)
-                break
-        if not ch_info:
-            _p(f"\n  WARNING: Ch{ch_num} boundary not found")
-            continue
+        if ch_num in chapter_seg_maps:
+            ch_title = v4_packages[ch_num].name
+            current_seg_map = chapter_seg_maps[ch_num]
+            ch_seg_ids = set(current_seg_map)
+        else:
+            ch_info = None
+            for num, title, start, end in boundaries:
+                if num == ch_num:
+                    ch_info = (num, title, start, end)
+                    break
+            if not ch_info:
+                _p(f"\n  WARNING: Ch{ch_num} boundary not found")
+                continue
 
-        _, ch_title, ch_start, ch_end = ch_info
-        ch_seg_ids = {s.id for s in all_segs
-                      if s.start_offset >= ch_start and s.start_offset < ch_end}
+            _, ch_title, ch_start, ch_end = ch_info
+            current_seg_map = seg_map
+            ch_seg_ids = {s.id for s in all_segs
+                          if s.start_offset >= ch_start and s.start_offset < ch_end}
 
         _p(f"\n{'=' * 60}")
         _p(f"质量报告：第{ch_num}回「{ch_title}」")
@@ -311,7 +380,7 @@ def run_quality_check(json_output: bool = False, fail_under: float | None = None
            f"Claims: {len(objects['claims'])}, Relations: {len(objects['relations'])}")
 
         # A. Grounding
-        grounding_issues = check_grounding(objects, seg_map)
+        grounding_issues = check_grounding(objects, current_seg_map)
         total_names_aliases = sum(1 + len(e.aliases or []) for e in objects["entities"])
         grounding_rate = 1.0 - (len(grounding_issues) / max(1, total_names_aliases))
         _p(f"\n  A. 文本溯源命中率: {grounding_rate:.0%}")
@@ -324,7 +393,7 @@ def run_quality_check(json_output: bool = False, fail_under: float | None = None
         all_issues.extend(grounding_issues)
 
         # B. Referential integrity
-        ref_issues = check_referential_integrity(objects, set(seg_map.keys()), all_entity_ids)
+        ref_issues = check_referential_integrity(objects, set(current_seg_map.keys()), all_entity_ids)
         # Count total references checked
         ref_total = 0
         for e in objects["entities"]:
@@ -353,7 +422,7 @@ def run_quality_check(json_output: bool = False, fail_under: float | None = None
         elif unreferenced:
             _p(f"     未引用 segments: {len(unreferenced)} total (showing first 5)")
             for sid in unreferenced[:5]:
-                txt = seg_map.get(sid, "?")[:40]
+                txt = current_seg_map.get(sid, "?")[:40]
                 _p(f"     - {sid}: {txt}...")
 
         # D. Event density
@@ -394,7 +463,10 @@ def run_quality_check(json_output: bool = False, fail_under: float | None = None
     # Write detailed report (always)
     report_path = output_dir / "quality_report.txt"
     with open(report_path, "w", encoding="utf-8") as f:
-        f.write("T2C 前三回提取质量报告\n")
+        if v4_packages:
+            f.write("T2C 当前 v4 Knowledge Code 质量报告\n")
+        else:
+            f.write("T2C legacy 单文件知识产物质量报告\n")
         f.write("=" * 60 + "\n\n")
         for iss in all_issues:
             f.write(f"[{iss['dim']}] {iss['obj_id']}: {iss['detail']}\n")
@@ -417,16 +489,19 @@ def run_quality_check(json_output: bool = False, fail_under: float | None = None
     total_ch_segs = 0
     total_referenced = 0
     for ch_num in chapter_objects:
-        ch_info = None
-        for num, title, start, end in boundaries:
-            if num == ch_num:
-                ch_info = (num, title, start, end)
-                break
-        if not ch_info:
-            continue
-        _, _, ch_start, ch_end = ch_info
-        ch_seg_ids = {s.id for s in all_segs
-                      if s.start_offset >= ch_start and s.start_offset < ch_end}
+        if ch_num in chapter_seg_maps:
+            ch_seg_ids = set(chapter_seg_maps[ch_num])
+        else:
+            ch_info = None
+            for num, title, start, end in boundaries:
+                if num == ch_num:
+                    ch_info = (num, title, start, end)
+                    break
+            if not ch_info:
+                continue
+            _, _, ch_start, ch_end = ch_info
+            ch_seg_ids = {s.id for s in all_segs
+                          if s.start_offset >= ch_start and s.start_offset < ch_end}
         objects = chapter_objects[ch_num]
         referenced = set()
         for ent in objects["entities"]:

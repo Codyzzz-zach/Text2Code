@@ -1,4 +1,4 @@
-"""Tests for scripts/quality_check.py — v3.3 quality gate."""
+"""Tests for scripts/quality_check.py — current Knowledge Code quality gate."""
 import json
 import subprocess
 import sys
@@ -9,7 +9,7 @@ import pytest
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 QUALITY_SCRIPT = PROJECT_ROOT / "scripts" / "quality_check.py"
-RAWTXT_PATH = PROJECT_ROOT / "rawtxt" / "红楼梦.txt"
+RAWTXT_PATH = PROJECT_ROOT / "data" / "rawtxt" / "红楼梦.txt"
 
 
 def _has_rawtxt():
@@ -37,7 +37,7 @@ def _extract_json(stdout: str) -> dict | None:
 
 @pytest.mark.skipif(not _has_rawtxt(), reason="rawtxt/红楼梦.txt not available")
 class TestQualityCheckJson:
-    """v3.3: quality_check --json returns machine-readable metrics."""
+    """quality_check --json returns machine-readable metrics."""
 
     def test_json_output_is_valid(self):
         """--json produces valid JSON."""

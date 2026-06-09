@@ -116,8 +116,8 @@ class TestMultiFileCompilation:
             output_dir=tmp_path,
         )
         assert set(written.keys()) == {
-            "__init__.py", "text.py", "entities.py",
-            "claims.py", "derived.py", "coverage.py",
+            "__init__.py", "text.py", "entities.py", "events.py",
+            "claims.py", "residuals.py", "derived.py", "coverage.py",
         }
         for path in written.values():
             assert path.exists()

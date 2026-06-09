@@ -34,6 +34,7 @@ from t2c.compact_candidate import (
     parse_compact_response,
 )
 from t2c.llm_cache import CacheEntry, CacheMode, LLMCache, compute_cache_key
+from t2c.llm_config import DEFAULT_LLM_MODEL
 from t2c.ontology import Segment
 
 logger = logging.getLogger(__name__)
@@ -252,7 +253,7 @@ class LLMExtractor:
 
     def __init__(
         self,
-        model: str = "MiniMax-M3",
+        model: str | None = None,
         api_key: str | None = None,
         base_url: str | None = None,
         *,
@@ -265,10 +266,10 @@ class LLMExtractor:
         config: Any = None,
         _client: Any = None,
     ) -> None:
-        # v4.0: config-first construction. If a config is provided, its
-        # fields take precedence over individual kwargs.
+        # v4.0+: config-first construction. If a config is provided, its
+        # fields fill in any omitted kwargs.
         if config is not None:
-            model = model if model != "MiniMax-M3" else config.model
+            model = model or config.model
             api_key = api_key or config.api_key or None
             base_url = base_url or config.base_url or None
             if max_tokens is None and config.max_tokens is not None:
@@ -293,10 +294,16 @@ class LLMExtractor:
                     "Install project dependencies or configure an extractor backend."
                 )
             self._client = anthropic.Anthropic(
-                api_key=api_key or os.environ.get("ANTHROPIC_AUTH_TOKEN") or os.environ.get("ANTHROPIC_API_KEY"),
-                base_url=base_url or os.environ.get("ANTHROPIC_BASE_URL"),
+                api_key=(
+                    api_key
+                    or os.environ.get("T2C_LLM_API_KEY")
+                    or os.environ.get("DEEPSEEK_API_KEY")
+                    or os.environ.get("ANTHROPIC_AUTH_TOKEN")
+                    or os.environ.get("ANTHROPIC_API_KEY")
+                ),
+                base_url=base_url or os.environ.get("T2C_LLM_BASE_URL") or os.environ.get("ANTHROPIC_BASE_URL"),
             )
-        self._model = model
+        self._model = model or DEFAULT_LLM_MODEL
         # max_tokens: explicit arg > T2C_MAX_TOKENS env > _DEFAULT_MAX_TOKENS
         if max_tokens is not None:
             self._max_tokens = max_tokens

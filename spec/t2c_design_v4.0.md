@@ -121,17 +121,21 @@ LLM 的输出是"原材料"，T2C 编译器把"原材料"加工成"code"。
 ```bash
 $ t2c compile raw.txt --output examples/knowledge/mybook/ch01/ \
                      --profile chinese_classical \
-                     --llm  # 不传则跳过 LLM，只生成 text.py + 空 coverage
+                     --llm  # 完整语义编译必须显式启用 LLM
 ```
 
 **CLI 跑完，磁盘上有 `.t2c.py` 文件包，T2C 编译器的工作就结束。**
+
+无 LLM 的低成本路径必须显式写成 `--text-only`。它只生成可回放 text map
+预检包，不计入完整 Text2Code E2E。
 
 ### 2.2 输入
 
 - `raw.txt` 路径（UTF-8 文本）
 - `--profile`（可选，默认 auto-detect）
 - `--output` 目录
-- `--llm` 开关（不传则只生成 text.py）
+- `--llm` 开关（完整语义编译必需）
+- `--text-only` 开关（只生成 text map 预检包，不做语义转写）
 - `--cache-mode`（`off`/`read_write`/`read_only`）
 
 ### 2.3 输出
@@ -360,7 +364,8 @@ v3.3 的 12 道门禁全部保留：
 ### 8.1 唯一入口
 
 ```bash
-$ t2c compile <raw.txt> --output <dir> [--profile <name>] [--llm]
+$ t2c compile <raw.txt> --output <dir> [--profile <name>] --llm
+$ t2c compile <raw.txt> --output <dir> --text-only
 ```
 
 ### 8.2 辅助命令
@@ -403,7 +408,7 @@ smoke / validator / textmap / graph / extractor / core / regression / e2e / full
 
 ```text
 pytest tests/                    全 pass
-t2c compile <raw.txt>            exit 0
+t2c compile <raw.txt> --llm      exit 0
 Pyright parse examples/knowledge 0 error
 mypy parse examples/knowledge    0 error
 tree-sitter parse examples/knowledge  0 error
@@ -522,7 +527,7 @@ text2code/
 
 **v4.0 兼容 v3.3 末态的代码生成结果。**
 
-旧的 `examples/knowledge/hongloumeng_ch01.knowledge.t2c.py` 仍然可被 v4.0 parser 解析。`t2c compile` 的输出在两种情况下完全等价：
+旧的单文件 `.knowledge.t2c.py` 仍可作为历史格式由 parser 兼容读取，但仓库不再保留这类旧产物。`t2c compile` 的输出在两种情况下完全等价：
 1. 相同输入 + 相同 profile + 相同 LLM
 2. 旧的单文件 .knowledge.t2c.py 仍然可读
 
@@ -546,7 +551,7 @@ text2code/
 
 ```text
 □ 363+ existing tests pass
-□ t2c compile raw.txt 退出 0，产出 .t2c.py 文件包
+□ t2c compile raw.txt --llm 退出 0，产出 .t2c.py 文件包
 □ t2c detect-profile 三个样本各返回正确 profile
 □ Pyright / mypy / tree-sitter 全部解析通过
 □ ObjectStore / Graph / GraphAPI 不在产品路径
@@ -609,7 +614,7 @@ text2code/
 **测试**：
 
 - [ ] `pytest tests/` 363+ tests pass
-- [ ] `t2c compile rawtxt/红楼梦.txt` 跑通
+- [ ] `t2c compile data/rawtxt/红楼梦.txt --llm` 跑通
 - [ ] `t2c test full` 0 collection error
 
 ## 附录 C：参考资料

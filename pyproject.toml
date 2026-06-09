@@ -11,6 +11,9 @@ dependencies = [
     "anthropic>=0.30",
 ]
 
+[project.scripts]
+t2c = "t2c.cli:main"
+
 [project.optional-dependencies]
 dev = [
     "pytest>=8.0",

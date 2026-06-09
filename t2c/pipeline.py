@@ -7,7 +7,6 @@ import time
 from dataclasses import dataclass, field
 from typing import Any
 
-from t2c.codegen import CodeGenerator
 from t2c.corpus import CorpusManager
 from t2c.extractor import LLMExtractor
 from t2c.object_store import ObjectStore
@@ -24,7 +23,6 @@ MAX_REPAIR_ATTEMPTS = 1
 @dataclass
 class PipelineResult:
     objects: list[dict] = field(default_factory=list)
-    code: str = ""
     valid: bool = True
     errors: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
@@ -44,7 +42,7 @@ class PipelineResult:
 
 
 class Pipeline:
-    """Full pipeline: Raw Text -> Segments -> Candidates -> Validation -> Repair -> Code -> Store."""
+    """Compile-time pipeline: raw text -> candidates -> validated objects in the staging store."""
 
     def __init__(
         self,
@@ -79,9 +77,8 @@ class Pipeline:
         5. Validate candidates
         6. Repair if invalid (up to max_repair_attempts)
         7. Validate schema + construct models
-        8. Generate code from valid models
-        9. Save valid objects to store (with validation gate)
-        10. Generate raw fallback Residual for unrepairable segments
+        8. Save valid objects to store (with validation gate)
+        9. Generate raw fallback Residual for unrepairable segments
         """
         result = PipelineResult()
         timings: dict[str, float] = {}
@@ -96,6 +93,7 @@ class Pipeline:
         # Step 2: Create blocks
         t0 = time.time()
         blocks = corpus.create_blocks(doc, raw_text)
+        doc.block_count = len(blocks)
         logger.info("Created %d blocks for %s", len(blocks), doc_id)
         timings["2_block_generation"] = time.time() - t0
 
@@ -110,9 +108,12 @@ class Pipeline:
         logger.info("Segmented %s into %d segments", doc_id, len(all_segments))
         timings["3_segmentation"] = time.time() - t0
 
-        # Save document and segments to store
+        # Save document, blocks, and segments to store. Blocks are part of
+        # the replayable text map and must reach final text.py output.
         t0 = time.time()
         self._store.save(doc)
+        for block in blocks:
+            self._store.save(block)
         for seg in all_segments:
             self._store.save(seg)
         timings["3b_store_segments"] = time.time() - t0
@@ -180,22 +181,15 @@ class Pipeline:
             models, _ = sv.validate_and_construct(objects)
         timings["7_schema_construct"] = time.time() - t0
 
-        # Step 8: Generate code from validated models
-        t0 = time.time()
-        if models:
-            codegen = CodeGenerator()
-            result.code = codegen.generate_knowledge_code(models)
-        timings["8_code_generation"] = time.time() - t0
-
-        # Step 9: Save valid objects to store (with validation gate)
+        # Step 8: Save valid objects to store (with validation gate)
         t0 = time.time()
         if models:
             saved_count, val_errors = self._store.save_validated_batch(models)
             result.saved_count = saved_count
             result.rejected_count = len(models) - saved_count
-        timings["9_store_save"] = time.time() - t0
+        timings["8_store_save"] = time.time() - t0
 
-        # Step 10: Raw fallback for uncovered segments.
+        # Step 9: Raw fallback for uncovered segments.
         # v4.0: always run — uncovers silent loss even when validation passed.
         # The internal logic distinguishes "validation error" (high importance)
         # from "uncovered" (medium importance) and labels accordingly.
@@ -204,7 +198,7 @@ class Pipeline:
             objects, all_segments, doc_id, val_result.errors
         )
         result.raw_fallback_segment_ids = raw_fallback_ids
-        timings["10_raw_fallback"] = time.time() - t0
+        timings["9_raw_fallback"] = time.time() - t0
 
         result.phase_timings = timings
         # Log the full timing breakdown

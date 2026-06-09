@@ -7,7 +7,15 @@ from unittest.mock import patch
 
 import pytest
 
-from t2c.llm_config import LLMConfig, _PROVIDER_PRESETS
+from t2c.llm_config import (
+    DEFAULT_CACHE_DIR,
+    DEFAULT_CACHE_MODE,
+    DEFAULT_EXTRACTOR_PROTOCOL,
+    DEFAULT_LLM_MODEL,
+    DEFAULT_LLM_PROVIDER,
+    LLMConfig,
+    _PROVIDER_PRESETS,
+)
 
 
 class TestProviderPresets:
@@ -30,6 +38,17 @@ class TestProviderPresets:
         assert cfg.provider == "openai"
         assert cfg.model == "gpt-4o-mini"
         assert cfg.api_key == "sk-openai"
+
+    def test_deepseek_preset(self):
+        cfg = LLMConfig.deepseek(api_key="sk-deepseek")
+        assert cfg.provider == "deepseek"
+        assert cfg.model == "deepseek-v4-flash"
+        assert cfg.base_url == "https://api.deepseek.com/anthropic"
+        assert cfg.api_key == "sk-deepseek"
+        assert cfg.cache_mode == DEFAULT_CACHE_MODE
+        assert cfg.cache_dir == DEFAULT_CACHE_DIR
+        assert cfg.extractor_protocol == DEFAULT_EXTRACTOR_PROTOCOL
+        assert cfg.thinking_budget == 0
 
     def test_custom_preset(self):
         cfg = LLMConfig.custom(
@@ -62,11 +81,27 @@ class TestFromEnv:
                                                 "T2C_CACHE_MODE", "T2C_CACHE_DIR"):
                 os.environ.pop(k, None)
 
-    def test_from_env_default_minimax(self):
-        os.environ["T2C_LLM_PROVIDER"] = "minimax"
-        os.environ["T2C_LLM_MODEL"] = "MiniMax-M3"
-        os.environ["T2C_LLM_BASE_URL"] = "https://api.minimaxi.com/anthropic"
-        cfg = LLMConfig.from_env()
+    def test_from_env_defaults_to_deepseek_flash(self):
+        with patch.dict(os.environ, {}, clear=True), \
+             patch("t2c.llm_config._load_dotenv", lambda *a, **kw: None), \
+             patch("t2c.llm_config._find_env_file", lambda *a, **kw: None):
+            cfg = LLMConfig.from_env()
+        assert cfg.provider == DEFAULT_LLM_PROVIDER
+        assert cfg.model == DEFAULT_LLM_MODEL
+        assert cfg.base_url == "https://api.deepseek.com/anthropic"
+        assert cfg.cache_mode == DEFAULT_CACHE_MODE
+        assert cfg.cache_dir == DEFAULT_CACHE_DIR
+        assert cfg.extractor_protocol == DEFAULT_EXTRACTOR_PROTOCOL
+        assert cfg.thinking_budget == 0
+
+    def test_from_env_can_still_select_minimax(self):
+        env = {
+            "T2C_LLM_PROVIDER": "minimax",
+            "T2C_LLM_MODEL": "MiniMax-M3",
+            "T2C_LLM_BASE_URL": "https://api.minimaxi.com/anthropic",
+        }
+        with patch.dict(os.environ, env, clear=True):
+            cfg = LLMConfig.from_env()
         assert cfg.provider == "minimax"
         assert cfg.model == "MiniMax-M3"
         assert cfg.base_url == "https://api.minimaxi.com/anthropic"
@@ -152,6 +187,11 @@ class TestFromDict:
         assert cfg.api_key == "sk-test"
         assert cfg.model == "MiniMax-M3"
 
+    def test_from_dict_default_deepseek(self):
+        cfg = LLMConfig.from_dict({"api_key": "sk-test"})
+        assert cfg.provider == "deepseek"
+        assert cfg.model == "deepseek-v4-flash"
+
     def test_from_dict_full(self):
         cfg = LLMConfig.from_dict({
             "provider": "anthropic",
@@ -226,9 +266,6 @@ class TestLLMExtractorIntegration:
         cfg = LLMConfig.minimax(api_key="sk-config", model="config-model")
         mock_client = object()
         ext = LLMExtractor(model="kwarg-model", config=cfg, _client=mock_client)
-        # Note: current code uses `model = model if model != "MiniMax-M3" else config.model`
-        # so a non-default model passes through. Use the default sentinel to
-        # verify config fallback: pass default + config.
         ext2 = LLMExtractor(config=cfg, _client=mock_client)
         assert ext2._model == "config-model"
         assert ext._model == "kwarg-model"
