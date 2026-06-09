@@ -8,8 +8,21 @@ from types import SimpleNamespace
 from pathlib import Path
 
 
-from t2c.cli import compile_command
+from t2c.cli import compile_command, main
 from t2c.pipeline import PipelineResult
+
+
+def test_cli_version():
+    proc = subprocess.run(
+        [sys.executable, "-m", "t2c.cli", "--version"],
+        cwd=Path(__file__).resolve().parent.parent,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert proc.returncode == 0
+    assert proc.stdout.strip().startswith("t2c ")
 
 
 def test_compile_without_mode_returns_guidance(tmp_path):
@@ -74,6 +87,91 @@ def test_compile_text_only_writes_importable_preflight_package(tmp_path):
     assert (out / "__init__.py").exists()
     assert (out / "text.py").exists()
     assert (out / "coverage.py").exists()
+
+
+def test_compile_library_without_mode_returns_guidance(tmp_path):
+    input_dir = tmp_path / "input_txt"
+    output_root = tmp_path / "output_code"
+    input_dir.mkdir()
+    (input_dir / "书一.txt").write_text("爱丽丝在火车站。", encoding="utf-8")
+
+    proc = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "t2c.cli",
+            "compile-library",
+            "--input-dir",
+            str(input_dir),
+            "--output-root",
+            str(output_root),
+            "--json",
+        ],
+        cwd=Path(__file__).resolve().parent.parent,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert proc.returncode == 1
+    payload = json.loads(proc.stdout)
+    assert payload["status"] == "error"
+    assert "requires --llm" in payload["error"]
+
+
+def test_compile_library_text_only_uses_book_named_output_dirs(tmp_path):
+    input_dir = tmp_path / "input_txt"
+    output_root = tmp_path / "output_code"
+    input_dir.mkdir()
+    (input_dir / "书一.txt").write_text("第一章\n爱丽丝在火车站。", encoding="utf-8")
+    (input_dir / "书二.txt").write_text("第一章\n白兔离开花园。", encoding="utf-8")
+
+    proc = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "t2c.cli",
+            "compile-library",
+            "--input-dir",
+            str(input_dir),
+            "--output-root",
+            str(output_root),
+            "--text-only",
+            "--json",
+        ],
+        cwd=Path(__file__).resolve().parent.parent,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert proc.returncode == 0, proc.stderr + proc.stdout
+    payload = json.loads(proc.stdout)
+    assert payload["status"] == "ok"
+    assert payload["mode"] == "text_only"
+    assert payload["compiled"] == 2
+    assert payload["failed"] == 0
+    assert (output_root / "书一" / "text.py").exists()
+    assert (output_root / "书二" / "text.py").exists()
+    assert payload["results"][0]["summary"]["semantic_compile"] is False
+
+
+def test_compile_library_default_directories_are_product_workflow(tmp_path, monkeypatch, capsys):
+    monkeypatch.chdir(tmp_path)
+    input_dir = tmp_path / "input_txt"
+    input_dir.mkdir()
+    (input_dir / "默认书.txt").write_text("第一章\n爱丽丝在火车站。", encoding="utf-8")
+
+    exit_code = main(["compile-library", "--text-only", "--json"])
+
+    captured = capsys.readouterr()
+    assert exit_code == 0, captured.err + captured.out
+    payload = json.loads(captured.out)
+    assert payload["status"] == "ok"
+    assert payload["input_dir"] == str(input_dir)
+    assert payload["output_root"] == str(tmp_path / "output_code")
+    assert (tmp_path / "output_code" / "默认书" / "text.py").exists()
+    assert payload["results"][0]["book"] == "默认书"
 
 
 def test_compile_cli_default_llm_config_is_deepseek(tmp_path):

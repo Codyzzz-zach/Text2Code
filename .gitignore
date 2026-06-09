@@ -36,6 +36,12 @@ examples/knowledge/**/quality_report.txt
 # Generated data (large files, regenerate via scripts)
 data/generated/
 
+# Local book inputs and generated Knowledge Code library
+input_txt/*
+!input_txt/.gitkeep
+output_code/*
+!output_code/.gitkeep
+
 # Logs
 *.log
 

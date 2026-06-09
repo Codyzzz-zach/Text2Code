@@ -1,6 +1,6 @@
-"""Knowledge Code writer — multi-file v4.0 Knowledge Code compilation target.
+"""Knowledge Code writer — multi-file Knowledge Code compilation target.
 
-This module is the end-to-end entry point for "raw text → 7 .t2c.py files on disk".
+This module is the end-to-end entry point for "raw text → importable Python files on disk".
 
 Public API:
     compile_to_knowledge_code(
@@ -32,9 +32,9 @@ def compile_to_knowledge_code(
     relations: list[Any] | None = None,
     coverage_report: Any | None = None,
     output_dir: str | Path,
-    version: str = "v4.0-flash",
+    version: str | None = None,
 ) -> dict[str, Path]:
-    """End-to-end: ontology models → 7 .t2c.py files on disk.
+    """End-to-end: ontology models → a Knowledge Code package on disk.
 
     Returns: {filename: absolute_path}
     """

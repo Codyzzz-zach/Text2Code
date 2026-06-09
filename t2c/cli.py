@@ -3,14 +3,17 @@ from __future__ import annotations
 
 import argparse
 import importlib
+import io
 import json
 import py_compile
 import re
 import sys
 import tempfile
+from contextlib import redirect_stdout
 from pathlib import Path
 from typing import Any
 
+from t2c import __version__
 from t2c.compile_target import compile_to_knowledge_code
 from t2c.corpus import CorpusManager
 from t2c.coverage import CoverageGenerator
@@ -348,11 +351,111 @@ def compile_command(args: argparse.Namespace) -> int:
             store.close()
 
 
+def _book_output_dir(raw_path: Path, output_root: Path) -> Path:
+    return output_root / _safe_doc_id(raw_path)
+
+
+def compile_library_command(args: argparse.Namespace) -> int:
+    input_dir = args.input_dir.resolve()
+    output_root = args.output_root.resolve()
+    if args.llm and args.text_only:
+        raise RuntimeError("--llm and --text-only are mutually exclusive")
+    if not args.llm and not args.text_only:
+        raise RuntimeError(
+            "Library compilation requires --llm. "
+            "Use --text-only for a low-cost text map preflight."
+        )
+    if not input_dir.exists():
+        raise FileNotFoundError(input_dir)
+    if not input_dir.is_dir():
+        raise RuntimeError(f"Input path is not a directory: {input_dir}")
+
+    raw_files = sorted(p for p in input_dir.glob("*.txt") if p.is_file())
+    if not raw_files:
+        raise RuntimeError(f"No .txt files found in {input_dir}")
+
+    results: list[dict[str, Any]] = []
+    failures: list[dict[str, Any]] = []
+
+    for raw_path in raw_files:
+        output_dir = _book_output_dir(raw_path, output_root)
+        child_args = argparse.Namespace(
+            raw_path=raw_path,
+            output=output_dir,
+            doc_id=args.doc_id_prefix + _safe_doc_id(raw_path) if args.doc_id_prefix else None,
+            llm=args.llm,
+            text_only=args.text_only,
+            provider=args.provider,
+            model=args.model,
+            base_url=args.base_url,
+            api_key=args.api_key,
+            max_tokens=args.max_tokens,
+            thinking_budget=args.thinking_budget,
+            cache_mode=args.cache_mode,
+            cache_dir=args.cache_dir,
+            protocol=args.protocol,
+            max_repair_attempts=args.max_repair_attempts,
+            chapter_num=args.chapter_num,
+            chapter_title=args.chapter_title or raw_path.stem,
+            no_verify=args.no_verify,
+            json=True,
+        )
+        try:
+            buffer = io.StringIO()
+            with redirect_stdout(buffer):
+                exit_code = compile_command(child_args)
+            if exit_code != 0:
+                raise RuntimeError(f"compile exited with status {exit_code}")
+            payload = json.loads(buffer.getvalue())
+            results.append({
+                "raw_path": str(raw_path),
+                "book": raw_path.stem,
+                "output_dir": str(output_dir),
+                "status": "ok",
+                "summary": payload,
+            })
+        except Exception as exc:
+            failure = {
+                "raw_path": str(raw_path),
+                "book": raw_path.stem,
+                "output_dir": str(output_dir),
+                "status": "error",
+                "error": str(exc),
+            }
+            failures.append(failure)
+            results.append(failure)
+            if not args.keep_going:
+                break
+
+    summary = {
+        "status": "ok" if not failures else "error",
+        "mode": "semantic_compile" if args.llm else "text_only",
+        "semantic_compile": bool(args.llm),
+        "input_dir": str(input_dir),
+        "output_root": str(output_root),
+        "total": len(raw_files),
+        "compiled": sum(1 for r in results if r["status"] == "ok"),
+        "failed": len(failures),
+        "results": results,
+    }
+    if args.json:
+        print(json.dumps(summary, ensure_ascii=False, indent=2))
+    else:
+        print(f"Compiled {summary['compiled']}/{summary['total']} books from {input_dir} -> {output_root}")
+        for result in results:
+            line = f"  {result['status']}: {result['book']} -> {result['output_dir']}"
+            if result["status"] == "error":
+                line += f" ({result['error']})"
+            print(line)
+    return 0 if not failures else 1
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="t2c", description="Text2Code compiler")
+    parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     sub = parser.add_subparsers(dest="command", required=True)
 
-    compile_p = sub.add_parser("compile", help="Compile raw text into a .t2c.py knowledge package")
+    compile_p = sub.add_parser("compile", help="Compile raw text into a Knowledge Code package")
     compile_p.add_argument("raw_path", type=Path, help="UTF-8 raw text file")
     compile_p.add_argument("--output", "-o", type=Path, required=True, help="Output package directory")
     compile_p.add_argument("--profile", default="default", help="Genre profile placeholder; currently informational")
@@ -383,6 +486,41 @@ def build_parser() -> argparse.ArgumentParser:
     compile_p.add_argument("--no-verify", action="store_true", help="Skip py_compile/import verification")
     compile_p.add_argument("--json", action="store_true", help="Print machine-readable summary")
     compile_p.set_defaults(func=compile_command)
+
+    library_p = sub.add_parser(
+        "compile-library",
+        help="Compile all .txt books from input_txt into output_code/<book>/ packages",
+    )
+    library_p.add_argument("--input-dir", type=Path, default=Path("input_txt"), help="Directory containing .txt books")
+    library_p.add_argument("--output-root", type=Path, default=Path("output_code"), help="Root directory for book packages")
+    library_p.add_argument("--doc-id-prefix", default="", help="Optional prefix for generated document IDs")
+    library_p.add_argument("--chapter-num", type=int, default=1, help="Chapter number passed to the extractor")
+    library_p.add_argument("--chapter-title", default="", help="Chapter title override; defaults to each filename")
+    library_p.add_argument("--llm", action="store_true", help="Run LLM candidate extraction for semantic compile")
+    library_p.add_argument(
+        "--text-only",
+        action="store_true",
+        help="Generate only replayable text map packages; not semantic compiles",
+    )
+    library_p.add_argument(
+        "--cache-mode",
+        choices=["off", "read_write", "read_only", "refresh"],
+        default=None,
+        help="LLM cache mode; defaults to read_write",
+    )
+    library_p.add_argument("--cache-dir", default=None, help="LLM cache directory; defaults to .t2c_cache")
+    library_p.add_argument("--provider", default=None, help="LLM provider; defaults to deepseek")
+    library_p.add_argument("--model", default=None, help="LLM model; defaults to deepseek-v4-flash")
+    library_p.add_argument("--base-url", default=None, help="LLM API base URL")
+    library_p.add_argument("--api-key", default=None, help="LLM API key; env vars are preferred")
+    library_p.add_argument("--max-tokens", type=int, default=None, help="LLM max output tokens")
+    library_p.add_argument("--thinking-budget", type=int, default=None, help="LLM thinking budget")
+    library_p.add_argument("--protocol", default=None, help="Extractor protocol; defaults to compact-v1")
+    library_p.add_argument("--max-repair-attempts", type=int, default=2)
+    library_p.add_argument("--no-verify", action="store_true", help="Skip py_compile/import verification")
+    library_p.add_argument("--keep-going", action="store_true", help="Continue after a book fails")
+    library_p.add_argument("--json", action="store_true", help="Print machine-readable summary")
+    library_p.set_defaults(func=compile_library_command)
     return parser
 
 

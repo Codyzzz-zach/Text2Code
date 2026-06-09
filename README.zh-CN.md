@@ -49,9 +49,9 @@
 <!-- 关于项目 -->
 ## 关于项目
 
-Text2Code (T2C) 是一个**文本→知识代码编译器**。它将原始自然语言文本（小说、法律条文、新闻等）通过 LLM 驱动的多阶段流水线处理，经 12 道校验门控，编译为结构化的 `.t2c.py` Python 模块。
+Text2Code (T2C) 是一个**文本→知识代码编译器**。它将原始自然语言文本（小说、法律条文、新闻等）通过 LLM 驱动的多阶段流水线处理，经校验门控编译为可 import 的 Python Knowledge Code 包。
 
-输出不是数据库、不是图谱——而是**代码**。每个实体、事件、声明、关系都变成一个带类型的 Python 变量，附带精确的原文溯源、跨文件引用和完整的可验证性。生成的 `.t2c.py` 文件可导入、可校验、可被代码智能工具（CodeGraph、Pyright、Sourcegraph）原生导航。
+输出不是数据库、不是图谱——而是**代码**。每个实体、事件、声明、关系都变成一个带类型的 Python 变量，附带精确的原文溯源、稳定 ID、跨文件 import 和完整的可验证性。生成的 `.py` 文件可导入、可校验、可被代码智能工具（CodeGraph、Pyright、Sourcegraph）原生导航。
 
 **为什么"代码即知识"？**
 
@@ -68,7 +68,7 @@ Text2Code (T2C) 是一个**文本→知识代码编译器**。它将原始自然
 ## 工作原理
 
 ```
-raw.txt ──► Segment ──► Extract(LLM) ──► Validate ──► Compact ──► CodeGen ──► .t2c.py
+input_txt/*.txt ──► Segment ──► Extract(LLM) ──► Validate ──► Compact ──► CodeGen ──► output_code/<书名>/
 ```
 
 | 阶段 | 模块 | 说明 |
@@ -78,7 +78,7 @@ raw.txt ──► Segment ──► Extract(LLM) ──► Validate ──► Co
 | **Extract** | `extractor.py` | LLM 驱动的实体/事件/声明/关系提取 |
 | **Validate** | `validator.py` + `schema.py` | 12-gate 结构与认识论校验，含修复 |
 | **Compact** | `compact_candidate.py` | 去重、压缩、关系推导 |
-| **CodeGen** | `codegen.py` | 确定性 `.t2c.py` 生成，含符号分配 |
+| **CodeGen** | `codegen.py` | 确定性 Python Knowledge Code 生成，含稳定符号 |
 | **Compile** | `compile_target.py` | 多文件编译输出 |
 
 **核心基础设施：** `ontology.py`（Pydantic 类型系统） · `llm_config.py`（多提供商 LLM 配置） · `llm_cache.py`（确定性缓存） · `claim_safety.py`（6 条认识论规则）
@@ -93,7 +93,7 @@ raw.txt ──► Segment ──► Extract(LLM) ──► Validate ──► Co
 每个文档编译为一个包含 8 个文件的 Python 包：
 
 ```
-hongloumeng/ch01/
+output_code/红楼梦/
 ├── __init__.py        # 包标记
 ├── text.py            # Document + Block + Segment 对象
 ├── entities.py        # Entity 对象（含证据引用）
@@ -108,21 +108,26 @@ hongloumeng/ch01/
 
 ```python
 # entities.py
+from .text import seg_0021
+
 ent_zh_64e599 = Entity(id='hlm_ent_0006', name='甄士隐', kind='person',
-    evidence_refs=[EvidenceRef(segment=seg_0021, start=0, end=3,
+    evidence_refs=[EvidenceRef(segment_id='hlm_seg_0021', start=0, end=3,
                                quote_hash='sha256:ae447e...')],
 )  # 甄士隐 (person)
 
 # claims.py
+from .entities import ent_zh_64e599, ent_zh_1fba96
+
 claim_ent0006_at_ent0002 = Claim(id='hlm_clm_0001',
-    subject=ent_zh_64e599, predicate='lives_in', object=ent_zh_1fba96,
+    subject='hlm_ent_0006', predicate='lives_in', object='hlm_ent_0002',
     modality='asserted', polarity='positive',
 )  # hlm_ent_0006 lives_in hlm_ent_0002
 ```
 
 关键特性：
-- **符号引用**（`subject=ent_zh_64e599`，而非 `subject='hlm_ent_0006'`）— CodeGraph 构建 `references` 边
-- **跨文件导入**（`from .entities import ent_zh_64e599`）— go-to-definition 跨文件导航
+- **稳定符号**（`ent_zh_64e599 = Entity(...)`）— CodeGraph 通过 Python AST 索引对象边界
+- **Pydantic 安全引用**（`subject='hlm_ent_0006'`）— 生成包可以作为普通 Python import 和校验
+- **跨文件导入**（`from .entities import ent_zh_64e599`）— 代码工具可发现包内关系
 - **行内注释**（`# 甄士隐 (person)`）— FTS5 全文搜索可命中中文名称
 - **证据溯源** — 每个声明回链到原文精确偏移
 
@@ -177,21 +182,29 @@ cp .env.example .env
 <!-- 使用方法 -->
 ## 使用方法
 
+### 标准书籍工作流
+
+把 `.txt` 书籍放进 `input_txt/`。T2C 会把每本书写到
+`output_code/<书名>/`。
+
+```bash
+t2c compile-library --llm --cache-mode read_write --json
+```
+
 ### 文本映射预检（无需 LLM）
 
 ```bash
-t2c compile examples/corpus/case_001.txt \
-  --output examples/knowledge/case_001 \
-  --text-only
+t2c compile-library --text-only --json
 ```
 
-这只会生成可回放的 text map 包，用于低成本预检；它不是完整语义转写。
+这会扫描 `input_txt/`，并在 `output_code/` 下生成可回放的 text map 包；
+它不是完整语义转写。
 
-### 使用 LLM 完整提取
+### 单文件编译
 
 ```bash
-t2c compile data/rawtxt/红楼梦.txt \
-  --output examples/knowledge/hongloumeng/full \
+t2c compile input_txt/红楼梦.txt \
+  --output output_code/红楼梦 \
   --llm \
   --cache-mode read_write
 ```
@@ -216,9 +229,11 @@ pytest -x -q                      # 遇到第一个失败即停止
 
 ```
 Text2Code/
+├── input_txt/                  # 放入原始 .txt 书籍
+├── output_code/                # 生成的 Knowledge Code 包
 ├── t2c/                        # 核心引擎
 │   ├── pipeline.py             # 流水线编排
-│   ├── cli.py                  # 公开 t2c compile 入口
+│   ├── cli.py                  # 公开 t2c compile-library / compile 入口
 │   ├── extractor.py            # LLM 提取器（compact-v1 协议）
 │   ├── codegen.py              # 知识代码生成
 │   ├── compile_target.py       # 多文件编译
@@ -232,22 +247,15 @@ Text2Code/
 │   ├── segmenter.py            # 语义文本分段
 │   ├── corpus.py               # 原始文本摄入
 │   ├── coverage.py             # 覆盖率报告生成
-│   ├── parser.py               # .t2c.py AST 解析器
+│   ├── parser.py               # 历史 .t2c.py AST 解析器
 │   ├── symbol_analyzer.py      # CodeGraph 兼容性验证
-│   ├── graph_builder.py        # 推导邻接图
-│   ├── graph_api.py            # 只读图谱查询 API
-│   └── object_store.py         # SQLite 对象存储
-├── tests/                      # 测试套件（411 个测试）
+│   ├── graph_builder.py        # 历史/实验 graph helper
+│   ├── graph_api.py            # 历史/实验 graph 查询 helper
+│   └── object_store.py         # 内部 staging store
+├── tests/                      # 测试套件
 ├── scripts/                    # 提取脚本与工具
-├── examples/                   # 示例语料与生成包
-│   ├── corpus/                 # 原始文本样本
-│   └── knowledge/              # 输出目录（.t2c.py 由 t2c compile 生成）
-├── data/                       # 大型数据文件
-│   ├── rawtxt/                 # 完整源文本
-│   └── generated/              # LLM 生成的大文件
 ├── spec/                       # 设计文档
 │   ├── t2c_design_v4.0.md      # 当前版本设计
-│   └── archive/                # 历史版本（v3.0–v3.3）
 ├── .env.example                # 环境变量模板
 └── pyproject.toml
 ```

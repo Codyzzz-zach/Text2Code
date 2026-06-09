@@ -49,9 +49,9 @@
 <!-- ABOUT THE PROJECT -->
 ## About The Project
 
-Text2Code (T2C) is a **text-to-knowledge-code compiler**. It takes raw natural language text — novels, legal documents, news articles — and compiles it into structured `.t2c.py` Python modules through a multi-stage pipeline powered by LLM extraction and 12-gate validation.
+Text2Code (T2C) is a **text-to-knowledge-code compiler**. It takes raw natural language text — novels, legal documents, news articles — and compiles it into importable Python Knowledge Code packages through a multi-stage pipeline powered by LLM extraction and validation gates.
 
-The output is not a database or a graph — it's **code**. Every entity, event, claim, and relation becomes a typed Python variable with precise source evidence, cross-file references, and full traceability. The resulting `.t2c.py` files are importable, verifiable, and natively navigable by code intelligence tools (CodeGraph, Pyright, Sourcegraph).
+The output is not a database or a graph — it's **code**. Every entity, event, claim, and relation becomes a typed Python variable with precise source evidence, stable IDs, cross-file imports, and full traceability. The resulting `.py` files are importable, verifiable, and natively navigable by code intelligence tools (CodeGraph, Pyright, Sourcegraph).
 
 **Why "code as knowledge"?**
 
@@ -68,7 +68,7 @@ The output is not a database or a graph — it's **code**. Every entity, event, 
 ## How It Works
 
 ```
-raw.txt ──► Segment ──► Extract(LLM) ──► Validate ──► Compact ──► CodeGen ──► .t2c.py
+input_txt/*.txt ──► Segment ──► Extract(LLM) ──► Validate ──► Compact ──► CodeGen ──► output_code/<book>/
 ```
 
 | Stage | Module | Description |
@@ -78,7 +78,7 @@ raw.txt ──► Segment ──► Extract(LLM) ──► Validate ──► Co
 | **Extract** | `extractor.py` | LLM-driven extraction of entities, events, claims, and relations |
 | **Validate** | `validator.py` + `schema.py` | 12-gate structural & epistemic validation with repair |
 | **Compact** | `compact_candidate.py` | Deduplication, compression, relation derivation |
-| **CodeGen** | `codegen.py` | Deterministic `.t2c.py` generation with symbol assignment |
+| **CodeGen** | `codegen.py` | Deterministic Python Knowledge Code generation with stable symbols |
 | **Compile** | `compile_target.py` | Multi-file compilation output |
 
 **Core infrastructure:** `ontology.py` (Pydantic type system) · `llm_config.py` (multi-provider LLM config) · `llm_cache.py` (deterministic cache) · `claim_safety.py` (6 epistemic rules)
@@ -93,7 +93,7 @@ raw.txt ──► Segment ──► Extract(LLM) ──► Validate ──► Co
 Each document is compiled into a Python package of 8 files:
 
 ```
-hongloumeng/ch01/
+output_code/hongloumeng/
 ├── __init__.py        # Package marker
 ├── text.py            # Document + Block + Segment objects
 ├── entities.py        # Entity objects (with evidence refs)
@@ -108,21 +108,26 @@ hongloumeng/ch01/
 
 ```python
 # entities.py
+from .text import seg_0021
+
 ent_zh_64e599 = Entity(id='hlm_ent_0006', name='甄士隐', kind='person',
-    evidence_refs=[EvidenceRef(segment=seg_0021, start=0, end=3,
+    evidence_refs=[EvidenceRef(segment_id='hlm_seg_0021', start=0, end=3,
                                quote_hash='sha256:ae447e...')],
 )  # 甄士隐 (person)
 
 # claims.py
+from .entities import ent_zh_64e599, ent_zh_1fba96
+
 claim_ent0006_at_ent0002 = Claim(id='hlm_clm_0001',
-    subject=ent_zh_64e599, predicate='lives_in', object=ent_zh_1fba96,
+    subject='hlm_ent_0006', predicate='lives_in', object='hlm_ent_0002',
     modality='asserted', polarity='positive',
 )  # hlm_ent_0006 lives_in hlm_ent_0002
 ```
 
 Key properties:
-- **Symbol references** (`subject=ent_zh_64e599`, not `subject='hlm_ent_0006'`) — CodeGraph builds `references` edges
-- **Cross-file imports** (`from .entities import ent_zh_64e599`) — go-to-definition navigates across files
+- **Stable symbols** (`ent_zh_64e599 = Entity(...)`) — CodeGraph indexes object boundaries through Python AST
+- **Pydantic-safe references** (`subject='hlm_ent_0006'`) — generated packages can be imported and validated as normal Python
+- **Cross-file imports** (`from .entities import ent_zh_64e599`) — code tools can discover package-level relationships
 - **Inline comments** (`# 甄士隐 (person)`) — FTS5 full-text search finds Chinese names
 - **Evidence traceability** — Every claim links back to exact source text offsets
 
@@ -177,22 +182,29 @@ Supported providers:
 <!-- USAGE -->
 ## Usage
 
+### Standard Book Workflow
+
+Put `.txt` books in `input_txt/`. T2C writes each book to
+`output_code/<book-name>/`.
+
+```bash
+t2c compile-library --llm --cache-mode read_write --json
+```
+
 ### Text Map Preflight (no LLM required)
 
 ```bash
-t2c compile examples/corpus/case_001.txt \
-  --output examples/knowledge/case_001 \
-  --text-only
+t2c compile-library --text-only --json
 ```
 
-This generates the replayable text map package only. It is a low-cost preflight,
-not a semantic Text2Code compile.
+This scans `input_txt/` and generates replayable text map packages under
+`output_code/`. It is a low-cost preflight, not a semantic Text2Code compile.
 
-### Full Extraction with LLM
+### Single File Compile
 
 ```bash
-t2c compile data/rawtxt/红楼梦.txt \
-  --output examples/knowledge/hongloumeng/full \
+t2c compile input_txt/红楼梦.txt \
+  --output output_code/红楼梦 \
   --llm \
   --cache-mode read_write
 ```
@@ -217,9 +229,11 @@ pytest -x -q                      # Stop on first failure
 
 ```
 Text2Code/
+├── input_txt/                  # Put source .txt books here
+├── output_code/                # Generated Knowledge Code packages
 ├── t2c/                        # Core engine
 │   ├── pipeline.py             # Pipeline orchestration
-│   ├── cli.py                  # Public t2c compile entry point
+│   ├── cli.py                  # Public t2c compile-library / compile entry point
 │   ├── extractor.py            # LLM extractor (compact-v1 protocol)
 │   ├── codegen.py              # Knowledge code generation
 │   ├── compile_target.py       # Multi-file compilation
@@ -233,22 +247,15 @@ Text2Code/
 │   ├── segmenter.py            # Semantic text segmentation
 │   ├── corpus.py               # Raw text ingestion
 │   ├── coverage.py             # Coverage report generation
-│   ├── parser.py               # .t2c.py AST parser
+│   ├── parser.py               # Historical .t2c.py AST parser
 │   ├── symbol_analyzer.py      # CodeGraph compatibility verification
-│   ├── graph_builder.py        # Derived adjacency graph
-│   ├── graph_api.py            # Read-only graph query API
-│   └── object_store.py         # SQLite-backed object storage
-├── tests/                      # Test suite (411 tests)
+│   ├── graph_builder.py        # Legacy/experimental graph helper
+│   ├── graph_api.py            # Legacy/experimental graph query helper
+│   └── object_store.py         # Internal staging store
+├── tests/                      # Test suite
 ├── scripts/                    # Extraction scripts & tools
-├── examples/                   # Sample corpus & generated packages
-│   ├── corpus/                 # Raw text samples
-│   └── knowledge/              # Output directory (.t2c.py generated by t2c compile)
-├── data/                       # Large data files
-│   ├── rawtxt/                 # Full-length source texts
-│   └── generated/              # LLM-generated large files
 ├── spec/                       # Design documents
 │   ├── t2c_design_v4.0.md      # Current version design
-│   └── archive/                # Previous versions (v3.0–v3.3)
 ├── .env.example                # Environment variable template
 └── pyproject.toml
 ```
