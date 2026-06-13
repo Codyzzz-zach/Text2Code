@@ -299,8 +299,12 @@ class CodeGenerator:
             obj_id = getattr(obj, "id", None) or str(i)
 
             if type_name == "Segment":
-                # seg_0000, seg_0001, ... — strictly sequential, not block_index
-                base = f"seg_{i:04d}"
+                # P4-2: derive segment symbol from ID suffix for stability
+                # e.g. "红楼梦1_3_seg_0015" → "seg_0015"
+                if "_seg_" in obj_id:
+                    base = "seg_" + obj_id.rsplit("_seg_", 1)[-1]
+                else:
+                    base = f"seg_{i:04d}"
                 name = base
                 suffix = 0
                 while name in used:
@@ -602,46 +606,48 @@ class CodeGenerator:
         ]
 
         # External symbol imports — group by module
+        # P4-2: only emit imports when symbol refs are actually used
         mod_syms: dict[str, list[str]] = {}
-        # Segment symbols always live in .text. Entity/Claim/Event/etc
-        # symbols are looked up by their ID type below.
-        for obj in objects:
-            # Check evidence_refs for segment symbol refs
-            erefs = getattr(obj, "evidence_refs", []) or []
-            for eref in erefs:
-                seg_id = getattr(eref, "segment_id", None)
-                if seg_id and seg_id in ext_syms:
-                    seg_sym = ext_syms[seg_id]
-                    mod_syms.setdefault(".text", []).append(seg_sym)
+        if self._emit_symbol_refs:
+            # Segment symbols always live in .text. Entity/Claim/Event/etc
+            # symbols are looked up by their ID type below.
+            for obj in objects:
+                # Check evidence_refs for segment symbol refs
+                erefs = getattr(obj, "evidence_refs", []) or []
+                for eref in erefs:
+                    seg_id = getattr(eref, "segment_id", None)
+                    if seg_id and seg_id in ext_syms:
+                        seg_sym = ext_syms[seg_id]
+                        mod_syms.setdefault(".text", []).append(seg_sym)
 
-            # Check Residual/IgnoreSegment segment_id for symbol refs
-            # These objects have a direct segment_id attribute (not in evidence_refs)
-            if obj.__class__.__name__ in ("Residual", "IgnoreSegment"):
-                seg_id = getattr(obj, "segment_id", None)
-                if seg_id and seg_id in ext_syms:
-                    mod_syms.setdefault(".text", []).append(ext_syms[seg_id])
+                # Check Residual/IgnoreSegment segment_id for symbol refs
+                # These objects have a direct segment_id attribute (not in evidence_refs)
+                if obj.__class__.__name__ in ("Residual", "IgnoreSegment"):
+                    seg_id = getattr(obj, "segment_id", None)
+                    if seg_id and seg_id in ext_syms:
+                        mod_syms.setdefault(".text", []).append(ext_syms[seg_id])
 
-            # Check Claim subject/object for entity symbol refs
-            if obj.__class__.__name__ == "Claim":
-                subject = getattr(obj, "subject", None)
-                if subject and subject in ext_syms:
-                    mod_syms.setdefault(".entities", []).append(ext_syms[subject])
-                obj_val = getattr(obj, "object", None)
-                if obj_val and obj_val in ext_syms:
-                    mod_syms.setdefault(".entities", []).append(ext_syms[obj_val])
+                # Check Claim subject/object for entity symbol refs
+                if obj.__class__.__name__ == "Claim":
+                    subject = getattr(obj, "subject", None)
+                    if subject and subject in ext_syms:
+                        mod_syms.setdefault(".entities", []).append(ext_syms[subject])
+                    obj_val = getattr(obj, "object", None)
+                    if obj_val and obj_val in ext_syms:
+                        mod_syms.setdefault(".entities", []).append(ext_syms[obj_val])
 
-            # Check Event participants for entity symbol refs
-            if obj.__class__.__name__ == "Event":
-                for pid in (getattr(obj, "participants", []) or []):
-                    if pid in ext_syms:
-                        mod_syms.setdefault(".entities", []).append(ext_syms[pid])
+                # Check Event participants for entity symbol refs
+                if obj.__class__.__name__ == "Event":
+                    for pid in (getattr(obj, "participants", []) or []):
+                        if pid in ext_syms:
+                            mod_syms.setdefault(".entities", []).append(ext_syms[pid])
 
-            # Check Relation subject/object/claim for symbol refs
-            if obj.__class__.__name__ == "Relation":
-                for field, mod in [("subject", ".entities"), ("object", ".entities"), ("claim_id", ".claims")]:
-                    val = getattr(obj, field, None)
-                    if val and val in ext_syms:
-                        mod_syms.setdefault(mod, []).append(ext_syms[val])
+                # Check Relation subject/object/claim for symbol refs
+                if obj.__class__.__name__ == "Relation":
+                    for field, mod in [("subject", ".entities"), ("object", ".entities"), ("claim_id", ".claims")]:
+                        val = getattr(obj, field, None)
+                        if val and val in ext_syms:
+                            mod_syms.setdefault(mod, []).append(ext_syms[val])
 
         for mod in sorted(mod_syms):
             unique_syms = sorted(set(mod_syms[mod]))
@@ -683,15 +689,29 @@ class CodeGenerator:
         type_name = obj.__class__.__name__
         fields = FIELD_ORDER.get(type_name, list(obj.__class__.model_fields.keys()))
 
-        # Skip internal/symbol fields in output
-        SKIP_FIELDS = {
-            "subject_symbol", "object_symbol", "segment_symbol",
-            "participant_symbols", "claim_symbol",
+        # P4-1: _symbol field derivation — FK→symbol lookup
+        _SYMBOL_DERIVATION = {
+            "subject_symbol": ("subject", False),
+            "object_symbol": ("object", False),
+            "segment_symbol": ("segment_id", False),
+            "claim_symbol": ("claim_id", False),
+            "participant_symbols": ("participants", True),
         }
 
         kwargs: list[str] = []
         for field_name in fields:
-            if field_name in SKIP_FIELDS:
+            # _symbol fields: derive from FK→symbol mapping
+            if field_name in _SYMBOL_DERIVATION:
+                fk_field, is_list = _SYMBOL_DERIVATION[field_name]
+                if is_list:
+                    fk_values = getattr(obj, fk_field, []) or []
+                    syms = [all_symbols[v] for v in fk_values if v in all_symbols]
+                    if syms:
+                        kwargs.append(f"{field_name}={syms!r}")
+                else:
+                    fk_value = getattr(obj, fk_field, None)
+                    if fk_value and fk_value in all_symbols:
+                        kwargs.append(f"{field_name}={all_symbols[fk_value]!r}")
                 continue
 
             value = getattr(obj, field_name, None)

@@ -175,6 +175,100 @@ class TestSegmentIntegrity:
             assert text[s.start_offset:s.end_offset] == s.text_slice
 
 
+class TestSpeakerDialogueMerge:
+    """P1-1: speaker attribution + dialogue merge."""
+
+    def test_speaker_merged_with_dialogue(self):
+        """他说：「你好啊。」→ 1 个 dialogue segment (说话人+对话合并)"""
+        seg = Segmenter()
+        text = '他说：「你好啊。」她回答：「我很好。」'
+        block, _ = _make_block(text)
+        segments = seg.segment_block("test", block, text)
+        dialogue_segs = [s for s in segments if s.segment_type == "dialogue"]
+        assert len(dialogue_segs) == 2
+        # 说话人应包含在对话 segment 中
+        assert '他说' in dialogue_segs[0].text_slice
+        assert '你好啊' in dialogue_segs[0].text_slice
+        assert '她回答' in dialogue_segs[1].text_slice
+
+    def test_no_attribution_dialogue_still_works(self):
+        """「你好啊。」再见。→ dialogue + sentence，单 dialogue 也能正确识别"""
+        seg = Segmenter()
+        text = '「你好啊。」再见。'
+        block, _ = _make_block(text)
+        segments = seg.segment_block("test", block, text)
+        types = [s.segment_type for s in segments]
+        assert "dialogue" in types
+        assert "sentence" in types
+
+    def test_colon_not_attribution(self):
+        """注意：这是重点。→ 不合并（'注意：' 不匹配说话人模式）"""
+        seg = Segmenter()
+        text = '注意：这是重点。'
+        block, _ = _make_block(text)
+        segments = seg.segment_block("test", block, text)
+        # 不应有 dialogue 类型（只有 sentence）
+        assert all(s.segment_type != "dialogue" for s in segments)
+
+    def test_multiple_speaker_dialogue_pairs(self):
+        """他说：「你好。」她答：「我很好。」→ 2 个合并后的 dialogue"""
+        seg = Segmenter()
+        text = '他说：「你好。」她答：「我很好。」'
+        block, _ = _make_block(text)
+        segments = seg.segment_block("test", block, text)
+        dialogue_segs = [s for s in segments if s.segment_type == "dialogue"]
+        assert len(dialogue_segs) == 2
+
+    def test_merged_offset_integrity(self):
+        """合并后 text_slice 与 offset 一致"""
+        seg = Segmenter()
+        text = '那僧道：「大师，弟子蠢物，不能礼佛。」'
+        block, _ = _make_block(text)
+        segments = seg.segment_block("test", block, text)
+        for s in segments:
+            assert text[s.start_offset:s.end_offset] == s.text_slice, (
+                f"Offset mismatch: expected '{text[s.start_offset:s.end_offset]}', "
+                f"got '{s.text_slice}'"
+            )
+
+    def test_merged_hash_correct(self):
+        """合并后 hash 正确"""
+        seg = Segmenter()
+        text = '宝玉笑道：「林妹妹，你放心。」'
+        block, _ = _make_block(text)
+        segments = seg.segment_block("test", block, text)
+        for s in segments:
+            expected = _sha256(s.text_slice)
+            assert s.hash == expected
+
+    def test_speaker_with_modifier(self):
+        """笑着说道：→ 合并（'着' 修饰语匹配）"""
+        seg = Segmenter()
+        text = '她笑着说道：「我很好。」他嚷：「走开！」'
+        block, _ = _make_block(text)
+        segments = seg.segment_block("test", block, text)
+        dialogue_segs = [s for s in segments if s.segment_type == "dialogue"]
+        assert len(dialogue_segs) == 2
+        assert '笑着说道' in dialogue_segs[0].text_slice
+
+    def test_speaker_pattern_variants(self):
+        """各种说话人模式：道/说/问/喊 — 需要两个 dialogue span 触发合并路径"""
+        seg = Segmenter()
+        variants = [
+            ('子兴道：「贾府如今不如从前。」冷子兴笑道：「确实如此。」', '子兴道'),
+            ('雨村说：「此事我已知。」贾政说：「你且说来。」', '雨村说'),
+            ('黛玉问：「你怎么来了？」宝玉问：「你为何在此？」', '黛玉问'),
+        ]
+        for text, speaker in variants:
+            block, _ = _make_block(text)
+            segments = seg.segment_block("test", block, text)
+            dialogue_segs = [s for s in segments if s.segment_type == "dialogue"]
+            assert len(dialogue_segs) >= 1, f"No dialogue for {text}"
+            assert speaker in dialogue_segs[0].text_slice, (
+                f"Speaker '{speaker}' not in dialogue text: {dialogue_segs[0].text_slice}"
+            )
+
+
 class TestCase001Integration:
     def test_case_001_segmentation(self, case_001_path, case_001_text):
         cm = CorpusManager()

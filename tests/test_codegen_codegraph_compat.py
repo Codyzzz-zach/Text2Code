@@ -151,7 +151,7 @@ class TestCrossFileImports:
     """All semantic files must import the symbols they reference."""
 
     def test_events_py_imports_entity_symbols(self):
-        """events.py must import entity symbols for CodeGraph imports edge."""
+        """events.py imports entity symbols only when emit_symbol_refs=True."""
         doc, blk, seg = _make_doc_seg()
         ent = Entity(id="ent1", name="甄士隐", kind="person")
         evt = Event(
@@ -162,22 +162,33 @@ class TestCrossFileImports:
             )],
         )
 
+        # Default mode (emit_symbol_refs=False): no dead imports
         gen = CodeGenerator()
         files = gen.generate_multi_file_compilation(
             doc=doc, blocks=[blk], segments=[seg],
             entities=[ent], events=[evt],
         )
-
         events_code = files["events.py"]
-        # Must import the entity symbol from .entities (for CodeGraph imports edge)
-        assert "from .entities import" in events_code, (
-            f"events.py should import from .entities\n{events_code}"
+        # P4-2: no imports when emit_symbol_refs=False (dead imports removed)
+        assert "from .entities import" not in events_code, (
+            f"events.py should NOT import from .entities when emit_symbol_refs=False\n{events_code}"
         )
-        # Default mode: participants use string literals (Pydantic-safe)
+        # participants use string literals (Pydantic-safe)
         assert "participants=['ent1']" in events_code
 
+        # Symbol ref mode: imports present
+        gen_sym = CodeGenerator(emit_symbol_refs=True)
+        files_sym = gen_sym.generate_multi_file_compilation(
+            doc=doc, blocks=[blk], segments=[seg],
+            entities=[ent], events=[evt],
+        )
+        events_sym_code = files_sym["events.py"]
+        assert "from .entities import" in events_sym_code, (
+            f"events.py should import from .entities when emit_symbol_refs=True\n{events_sym_code}"
+        )
+
     def test_derived_py_imports_entity_and_claim_symbols(self):
-        """derived.py must import entity and claim symbols."""
+        """derived.py imports only when emit_symbol_refs=True."""
         doc, blk, seg = _make_doc_seg()
         ent1 = Entity(id="ent1", name="甄士隐", kind="person")
         ent2 = Entity(id="ent2", name="姑苏", kind="location")
@@ -190,6 +201,7 @@ class TestCrossFileImports:
             object="ent2", claim_id="clm1",
         )
 
+        # Default mode (emit_symbol_refs=False): no dead imports
         gen = CodeGenerator()
         files = gen.generate_multi_file_compilation(
             doc=doc, blocks=[blk], segments=[seg],
@@ -197,12 +209,23 @@ class TestCrossFileImports:
         )
 
         derived_code = files["derived.py"]
-        assert "from .entities import" in derived_code, (
-            f"derived.py should import from .entities\n{derived_code}"
+        # P4-2: no imports when emit_symbol_refs=False
+        assert "from .entities import" not in derived_code, (
+            f"derived.py should NOT import from .entities when emit_symbol_refs=False\n{derived_code}"
         )
-        assert "from .claims import" in derived_code, (
-            f"derived.py should import from .claims\n{derived_code}"
+        assert "from .claims import" not in derived_code, (
+            f"derived.py should NOT import from .claims when emit_symbol_refs=False\n{derived_code}"
         )
+
+        # Symbol ref mode: imports present
+        gen_sym = CodeGenerator(emit_symbol_refs=True)
+        files_sym = gen_sym.generate_multi_file_compilation(
+            doc=doc, blocks=[blk], segments=[seg],
+            entities=[ent1, ent2], claims=[claim], relations=[rel],
+        )
+        derived_sym = files_sym["derived.py"]
+        assert "from .entities import" in derived_sym
+        assert "from .claims import" in derived_sym
 
     def test_events_py_no_entity_imports_when_no_entities(self):
         """events.py should not import from .entities when no entities exist."""

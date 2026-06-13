@@ -9,6 +9,7 @@ from typing import Any, Sequence
 
 from pydantic import BaseModel
 
+from t2c.coverage import CoverageGenerator
 from t2c.claim_safety import ClaimSafetyValidator
 from t2c.parser import T2CParseError, T2CParser
 from t2c.schema import SchemaValidator, SchemaViolation
@@ -61,6 +62,11 @@ class Validator:
         for v in schema_violations:
             errors.append(f"Schema violation in {v.object_type} ({v.object_id}): {v.field} — {v.message}")
 
+        # Step 2b: ID uniqueness validation
+        id_errors, id_warnings = self._validate_id_uniqueness(objects)
+        errors.extend(id_errors)
+        warnings.extend(id_warnings)
+
         # Step 3: Reference validation (full ID reference checks)
         ref_errors, ref_warnings = self._validate_references(objects)
         errors.extend(ref_errors)
@@ -87,7 +93,40 @@ class Validator:
             warnings=warnings,
         )
 
-    def validate_objects(self, objects: list[dict]) -> ValidationResult:
+    def _validate_coverage(self, objects: list[dict]) -> list[str]:
+        """D8 gate: Check that all segments are accounted for (not uncovered).
+        
+        Uses CoverageGenerator.coverage_from_parsed_objects to compute coverage
+        from parsed objects without needing an ObjectStore. Returns warnings
+        (not errors) since uncovered segments are a quality issue, not a
+        correctness issue.
+        """
+        warnings: list[str] = []
+        try:
+            report = CoverageGenerator.coverage_from_parsed_objects(objects)
+            if report is None:
+                return warnings
+            status_counts = report.get("status_counts", {})
+            uncovered = status_counts.get("uncovered", 0)
+            total = report.get("total_segments", 0)
+            covered = status_counts.get("covered", 0)
+            if total > 0:
+                rate = covered / total
+                logger.info(
+                    "Coverage gate: %d/%d segments covered (%.1f%%), %d uncovered",
+                    covered, total, rate * 100, uncovered,
+                )
+            if uncovered > 0:
+                warnings.append(
+                    f"Coverage: {uncovered} segments uncovered out of {total} total "
+                    f"(covered={covered}, rate={rate:.1%})"
+                )
+        except Exception as exc:
+            logger.warning("Coverage gate failed: %s: %s", type(exc).__name__, exc)
+        return warnings
+
+
+    def validate_objects(self, objects: list[dict], *, validate_coverage: bool = False) -> ValidationResult:
         errors: list[str] = []
         warnings: list[str] = []
 
@@ -95,6 +134,11 @@ class Validator:
         schema_violations = self._schema_validator.validate(objects)
         for v in schema_violations:
             errors.append(f"Schema violation in {v.object_type} ({v.object_id}): {v.field} — {v.message}")
+
+        # ID uniqueness validation
+        id_errors, id_warnings = self._validate_id_uniqueness(objects)
+        errors.extend(id_errors)
+        warnings.extend(id_warnings)
 
         # Reference validation (ID-based)
         ref_errors, ref_warnings = self._validate_references(objects)
@@ -115,6 +159,12 @@ class Validator:
         cs_errors, cs_warnings = self._validate_claim_safety(objects)
         errors.extend(cs_errors)
         warnings.extend(cs_warnings)
+
+
+        # D8: Coverage gate (opt-in)
+        if validate_coverage:
+            cov_warnings = self._validate_coverage(objects)
+            warnings.extend(cov_warnings)
 
         return ValidationResult(
             valid=len(errors) == 0,
@@ -144,6 +194,27 @@ class Validator:
             if obj_id:
                 all_ids.add(str(obj_id))
         return all_ids
+
+    def _validate_id_uniqueness(self, objects: list[dict]) -> tuple[list[str], list[str]]:
+        """P1 gate: Check that no two objects of the same type share the same ID."""
+        errors: list[str] = []
+        seen: dict[str, dict[str, str]] = {}  # type_name -> {id: obj_id_for_error}
+        for obj in objects:
+            type_name = obj.get("type", "")
+            data = obj.get("data", {})
+            obj_id = data.get("id")
+            if not obj_id:
+                continue
+            obj_id = str(obj_id)
+            type_seen = seen.setdefault(type_name, {})
+            if obj_id in type_seen:
+                errors.append(
+                    f"Duplicate {type_name} ID: {obj_id} "
+                    f"(also in {type_seen[obj_id]})"
+                )
+            else:
+                type_seen[obj_id] = type_name  # Just store type for error msg
+        return errors, []
 
     # -- Reference validation -------------------------------------------
 
@@ -237,6 +308,17 @@ class Validator:
                     self._check_ref(
                         obj_id, "Claim", "object", str(obj_val),
                         "Entity", id_sets, merged_id_sets, errors, warnings,
+                    )
+                # D3: Detect self-referencing Claims (subject==object, both entity IDs)
+                subj_val = data.get("subject")
+                if (subj_val and obj_val
+                    and not self._is_symbol_marker(subj_val)
+                    and not self._is_symbol_marker(str(obj_val))
+                    and subj_val == str(obj_val)
+                    and self._is_entity_id_style(subj_val)):
+                    errors.append(
+                        f"Reference error in Claim ({obj_id}): "
+                        f"self-referencing subject==object: '{subj_val}'"
                     )
                 # source: Entity.id or Claim.id
                 source_val = data.get("source")

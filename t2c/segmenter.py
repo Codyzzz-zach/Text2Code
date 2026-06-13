@@ -10,6 +10,14 @@ from t2c.ontology import Block, Segment
 class Segmenter:
     """Rule-based text segmenter producing Segment objects with stable offsets."""
 
+    # Speaker-attribution pattern: matches sentences that introduce dialogue
+    # e.g. "那僧道：", "宝玉笑道：", "黛玉问：", "她回答："
+    _SPEAKER_ATTR_RE = re.compile(
+        r'[道说笑哭骂叹答问喊叫吼唱念嘟囔嘀咕嚷][着了过]?'
+        r'(?:道|说|问)?'
+        r'[：:]$'
+    )
+
     def __init__(self) -> None:
         self._doc_seg_counters: dict[str, int] = {}
 
@@ -38,8 +46,8 @@ class Segmenter:
         """Split paragraph into sentences (Chinese + English) and dialogue."""
         # Detect dialogue segments first
         dialogue_spans = self._extract_dialogue_spans(text)
-        if dialogue_spans and len(dialogue_spans) >= 2:
-            # If significant dialogue content, split by dialogue
+        if dialogue_spans:
+            # If dialogue content exists, split by dialogue spans
             result: list[tuple[int, int, str]] = []
             prev_end = 0
             for d_start, d_end, d_text in dialogue_spans:
@@ -63,11 +71,11 @@ class Segmenter:
                     actual_start = prev_end + lstrip_len
                     after_spans = self._split_sentences(after, actual_start)
                     result.extend(after_spans)
-            return result if result else self._split_sentences(text, 0)
+            merged = self._merge_speaker_dialogue(result, text)
+            return merged if merged else self._split_sentences(text, 0)
 
-        # No significant dialogue — split by sentences
+        # No dialogue — split by sentences
         return self._split_sentences(text, 0)
-
     def _segment_heading(self, text: str) -> list[tuple[int, int, str]]:
         """Heading is its own segment."""
         stripped = text.strip()
@@ -171,6 +179,45 @@ class Segmenter:
         for m in re.finditer(r'["“][^"”]*["”]', text):
             spans.append((m.start(), m.end(), "dialogue"))
         return spans
+
+    def _merge_speaker_dialogue(
+        self,
+        spans: list[tuple[int, int, str]],
+        text: str,
+    ) -> list[tuple[int, int, str]]:
+        """Merge speaker-attribution sentences with the following dialogue span.
+
+        When a "sentence" segment immediately precedes a "dialogue" segment
+        and the sentence ends with a speaker-attribution pattern (e.g. "说道：",
+        "笑道：", "问："), merge them into a single "dialogue" span. This avoids
+        creating orphan 2-3 character segments like "那僧道：" that carry no
+        extractable knowledge on their own.
+        """
+        if not spans:
+            return spans
+        merged: list[tuple[int, int, str]] = []
+        i = 0
+        while i < len(spans):
+            curr = spans[i]
+            # Check if current is a sentence followed by a dialogue span
+            if (
+                curr[2] == "sentence"
+                and i + 1 < len(spans)
+                and spans[i + 1][2] == "dialogue"
+            ):
+                next_span = spans[i + 1]
+                # Must be adjacent (no gap between them)
+                if curr[1] == next_span[0]:
+                    # Check if the sentence text matches speaker attribution
+                    sent_text = text[curr[0]:curr[1]]
+                    if self._SPEAKER_ATTR_RE.search(sent_text.rstrip()):
+                        # Merge: combine sentence + dialogue into one dialogue span
+                        merged.append((curr[0], next_span[1], "dialogue"))
+                        i += 2  # skip both spans
+                        continue
+            merged.append(curr)
+            i += 1
+        return merged
 
     # -- Convert spans to Segment objects --------------------------------
 

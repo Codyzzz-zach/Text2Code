@@ -247,12 +247,13 @@ def _parse_single(item: dict[str, Any], raw_index: int) -> CompactCandidate | No
             fields["object"] = o
         else:
             fields["object"] = str(o)
-        m = item.get("m", "asserted")
-        if isinstance(m, str) and m in VALID_MODALITIES:
+        m = item.get("m", None)
+        if m is not None and isinstance(m, str) and m in VALID_MODALITIES:
             fields["modality"] = m
-        else:
-            fields["modality"] = "asserted"
-            warnings.append(f"unknown modality {m!r}; defaulted to 'asserted'")
+        elif m is not None:
+            fields["modality"] = None  # let expand_candidates derive from segment_type
+            warnings.append(f"unknown modality {m!r}; will derive from segment_type")
+        # else: m is None → expand_candidates derives from segment_type
         pol = item.get("pol", "positive")
         if isinstance(pol, str) and pol in VALID_POLARITIES:
             fields["polarity"] = pol
@@ -490,6 +491,7 @@ def expand_candidates(
             continue
         for w in c.parse_warnings:
             warnings.append(f"ent#{c.raw_index}: {w}")
+        name = c.fields.get("name", "")
         canonical_id = f"{doc_id}_ent_{ent_counter:04d}"
         ent_counter += 1
         local = c.fields.get("local_id")
@@ -568,12 +570,22 @@ def expand_candidates(
                 obj_resolved = local_to_canonical.get(obj_raw, obj_raw)
             else:
                 obj_resolved = None
+            # P2-1: modality 从 segment_type 程序化推导
+            modality_raw = c.fields.get("modality", None)
+            if modality_raw is None:
+                seg_types = set()
+                for sid in c.fields.get("source_segment_ids", []):
+                    seg = segments_by_id.get(sid)
+                    if seg:
+                        seg_types.add(seg.segment_type)
+                non_asserted = {"dialogue", "heading", "list_item", "table_row"}
+                modality_raw = "reported" if seg_types & non_asserted else "asserted"
             data = {
                 "id": f"{doc_id}_clm_{clm_counter:04d}",
                 "subject": subj_resolved,
                 "predicate": c.fields.get("predicate", "related_to"),
                 "object": obj_resolved,
-                "modality": c.fields.get("modality", "asserted"),
+                "modality": modality_raw,
                 "polarity": c.fields.get("polarity", "positive"),
                 "source_segment_ids": list(c.fields.get("source_segment_ids", [])),
             }
@@ -605,6 +617,11 @@ def derive_relations(
 ) -> tuple[list[dict], list[str]]:
     """Return (relations, warnings) — one Relation per eligible Claim.
 
+    P3-1 enhancements:
+      - Dedup: same (subject, predicate, object) only produces one Relation,
+        with evidence_refs merged from all contributing Claims.
+      - Stable ID: derived from claim_id when possible.
+
     Eligibility (must satisfy ALL):
       - Claim.modality == "asserted"
       - Claim.polarity == "positive"
@@ -615,6 +632,9 @@ def derive_relations(
     relations: list[dict] = []
     warnings: list[str] = []
     rel_counter = next_rel_idx
+
+    # P3-1: dedup by (subject, predicate, object) triple
+    rel_dedup: dict[tuple, int] = {}  # dedup_key → index in relations list
 
     # Pre-index claims for O(1) id lookup.
     claim_id_set: set[str] = set()
@@ -659,22 +679,41 @@ def derive_relations(
             )
             continue
 
-        rid = (
-            f"{doc_id}_rel_{rel_counter:04d}" if doc_id
-            else f"rel_{rel_counter:04d}"
-        )
-        rel_counter += 1
-        relations.append({
+        # P3-1: dedup check
+        predicate = data.get("predicate", "related_to")
+        dup_key = (subj, predicate, obj_val)
+        if dup_key in rel_dedup:
+            # Merge evidence_refs into existing relation
+            existing_idx = rel_dedup[dup_key]
+            existing_refs = relations[existing_idx]["data"].setdefault("evidence_refs", [])
+            for ref in data.get("evidence_refs", []):
+                if ref not in existing_refs:
+                    existing_refs.append(ref)
+            continue
+
+        # P3-1: stable ID from claim_id
+        if doc_id and "_clm_" in cid:
+            rid = cid.replace("_clm_", "_rel_clm_", 1)
+        else:
+            rid = (
+                f"{doc_id}_rel_{rel_counter:04d}" if doc_id
+                else f"rel_{rel_counter:04d}"
+            )
+            rel_counter += 1
+
+        rel_obj = {
             "type": "Relation",
             "data": {
                 "id": rid,
                 "subject": subj,
-                "predicate": data.get("predicate", "related_to"),
+                "predicate": predicate,
                 "object": obj_val,
                 "claim_id": cid,
                 "evidence_refs": list(data.get("evidence_refs", [])),
             },
-        })
+        }
+        rel_dedup[dup_key] = len(relations)
+        relations.append(rel_obj)
 
     return relations, warnings
 

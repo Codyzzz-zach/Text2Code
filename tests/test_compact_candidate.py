@@ -76,7 +76,8 @@ class TestParseCompactResponse:
     def test_parse_normalizes_modality(self):
         text = '[{"t":"C","s":"e1","p":"x","o":"e2","m":"BOGUS","pol":"x","sid":["s1"]}]'
         cands = parse_compact_response(text)
-        assert cands[0].fields["modality"] == "asserted"
+        # P2-1: unknown modality → None (expand_candidates derives from segment_type)
+        assert cands[0].fields["modality"] is None
         assert cands[0].fields["polarity"] == "positive"
         # parse_warnings should mention both
         joined = " ".join(cands[0].parse_warnings)
@@ -369,4 +370,7 @@ class TestDeriveRelations:
                                        "end": 1, "quote_hash": "h"}]),
         ]
         rels, _ = derive_relations(objs, {"e1", "e2"}, doc_id="d")
-        assert len(rels) == 2
+        # P3-1: same (subject, predicate, object) → deduped to 1 Relation
+        assert len(rels) == 1
+        # evidence_refs merged from both claims
+        assert len(rels[0]["data"]["evidence_refs"]) == 2

@@ -230,6 +230,9 @@ class TestMultiFileCompilation:
             for n in ast.parse(text_src).body
             if isinstance(n, ast.Assign)
         }
+        # P4-2: when emit_symbol_refs=False (default), no cross-file imports
+        # are emitted because they would be dead imports (symbols not used).
+        # Verify the generated code is valid Python without dead imports.
         ent_src = (pkg / "entities.py").read_text(encoding="utf-8")
         ent_imports = {
             a.name
@@ -237,12 +240,8 @@ class TestMultiFileCompilation:
             if isinstance(n, ast.ImportFrom) and n.module == "text" and n.level == 1
             for a in n.names
         }
-        # entities.py must import at least one segment symbol
-        if segments:
-            assert ent_imports, f"entities.py should import from .text — got {ent_imports}"
-            for sym in ent_imports:
-                assert sym in text_symbols, f"entities.py imports {sym} but text.py does not export it"
-        # claims.py must import at least the entity symbol
+        # No imports from .text when emit_symbol_refs=False
+        assert not ent_imports, f"entities.py should NOT import from .text when emit_symbol_refs=False — got {ent_imports}"
         clm_src = (pkg / "claims.py").read_text(encoding="utf-8")
         clm_ent_imports = {
             a.name
@@ -250,8 +249,7 @@ class TestMultiFileCompilation:
             if isinstance(n, ast.ImportFrom) and n.module == "entities" and n.level == 1
             for a in n.names
         }
-        if segments:
-            assert clm_ent_imports, f"claims.py should import from .entities — got {clm_ent_imports}"
+        assert not clm_ent_imports, f"claims.py should NOT import from .entities when emit_symbol_refs=False — got {clm_ent_imports}"
 
     def test_coverage_py_is_generated(self, tmp_path):
         text = "爱丽丝在火车站。"

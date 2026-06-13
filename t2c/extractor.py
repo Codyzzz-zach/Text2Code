@@ -52,7 +52,7 @@ EXTRACTION_PROMPT = """\
 
 ## 输入文本
 
-每行格式：[segment_id] 文本内容
+每行格式：[segment_id|segment_type] 文本内容
 
 {segments_formatted}
 
@@ -162,14 +162,18 @@ COMPACT_PROMPT_PREFIX = """\
 - `n` = 实体名，`k` = kind（person/location/org/artifact/concept）
 - `a` = 其他称呼列表，可省
 - `sid` = 出现的 segment id 列表
-- `q` = 用于 EvidenceRef 定位的原文引用片段列表，可省
+- `q` = 用于 EvidenceRef 定位的原文引用片段列表
 
 **⚠️ 人物抽取是最优先任务：**
 - 必须提取文本中**每一个**有名字的人物（包括被称呼但未全名出现的角色）
 - 同一人物用不同称呼时，取最常用名作 `n`，其余作 `a`（如 "王熙凤"→n, ["凤姐","琏二奶奶","凤辣子"]→a）
 - "太太""奶奶""老爷""大爷"等称谓如果指向特定人物，也要提取（如 "尤氏"→E, k=person）
 - 不要遗漏对话中提到的人物（如 "那金荣...""你兄弟秦钟..."）
-- 人物的 `sid` 应包含所有提及该人物的 segment
+- **只提取在故事情节中出场或被直接提及的人物，不提取典故引用中仅作为比喻出现的人物**（如"西施""文君""红娘"仅作为比喻出现，不提取）。故事内的神话/仙界人物（如"警幻仙子""神瑛侍者"）属于故事角色，应正常提取。
+
+**⚠️ 地点提取边界：**
+- 只提取城市、府邸、庙宇、山川、国家等**宏观地点**（如"姑苏""荣国府""葫芦庙"）
+- 不提取房间、门、廊、影壁、院落等**建筑细部**（如"东廊三间小正房""垂花门"不提取）
 
 ### EV = Event（事件）
 ```json
@@ -184,8 +188,9 @@ COMPACT_PROMPT_PREFIX = """\
 - `s` = subject (entity id or lid)
 - `p` = predicate（使用以下受控词表之一：is_child_of, is_spouse_of, is_relative_of, is_friend_of, is_enemy_of, is_master_of, is_servant_of, is_member_of, lives_in, visits, treats, introduces, requests, informs, persuades, scolds, comforts, said, believes, knows, fears, desires, plans_to, owns, gives, receives, attends, governs, teaches, studies。如果以上都不合适，可用简洁的英文动词短语）
 - `o` = object (entity id, lid, or literal string)
-- `m` = modality (asserted/reported/claimed_by_source/uncertain/hypothetical/conditional/inferred)
 - `pol` = polarity (positive/negative)
+
+**不要输出 `m`（modality）字段**——modality 由程序根据 segment_type 自动推导（dialogue→reported, 叙述→asserted）。
 
 ## 严禁输出
 
@@ -199,11 +204,16 @@ COMPACT_PROMPT_PREFIX = """\
 
 1. 同一人物用相同 lid；跨实体引用时优先用本批的 lid
 2. **人物完整性优先于声明完整性**——宁可少一条 Claim，不可漏一个人物
-3. 不确定信息用 modality=uncertain，不要硬上 asserted
-4. 转述/对白用 reported 或 claimed_by_source
+3. 不确定信息仍可加 `m=uncertain`，但正常 Claim **不要**输出 `m` 字段
+4. 对白/转述**不要**输出 `m=reported`，程序会根据 segment_type 自动判断
 5. `q` 给出一小段原文引用即可，程序会精确定位并算 hash
 6. `sid` 必须是输入中真实存在的 segment id
 7. 不编造，不推断，找不到的宁可不写
+8. **已知人物不要重复创建**——如果人物已在「已知人物」列表中（有 Entity ID），在 Claim/EV 的 `s`/`o`/`p` 中直接使用其 Entity ID，不要再创建新的 E 候选
+9. **已知人物的别名也属于该人物**——如果文本中出现已知人物的别名，使用其 Entity ID 而非新建
+10. **「请确保提取」列表中的人物**——如果文本中出现了这些人物，请务必创建对应的 E 候选（用你自己的 lid）。此列表仅供参考，不影响你的正常提取流程
+11. **`q` 不可省**——每个 E/EV/C 都必须提供至少一个原文引用片段（`q` 字段）。如果实在找不到合适的引用，缩小 `sid` 范围到有明确原文支撑的 segment
+12. **`sid` 完整性**——人物的 `sid` 应包含本批中**所有提及该人物的 segment**，不只是首次出现。这直接影响覆盖率。仔细扫描每行 segment，检查是否提到了该人物（包括代词"他""她"如果上下文明确指向该人物）
 """
 
 COMPACT_PROMPT_SUFFIX = """\
@@ -214,13 +224,38 @@ COMPACT_PROMPT_SUFFIX = """\
 
 ## 输入文本
 
-每行格式：`[segment_id] 文本内容`
+每行格式：`[segment_id|segment_type] 文本内容`
 
 {segments_formatted}
 
 {existing_entities_section}
 
 请直接返回紧凑 JSON 数组。
+"""
+
+
+ENTITY_SCAN_PROMPT = """\
+扫描下面的文本，找出所有出现的人物、地点、组织、物品等实体。
+
+**只输出 JSON 数组**，每个元素格式：
+```json
+{{"n":"甄士隐","k":"person","a":["士隐","隐公"]}}
+```
+- `n` = 实体最常用名称
+- `k` = kind (person/location/org/artifact/concept)
+- `a` = 别名/其他称呼列表
+
+要求：
+1. 列出**每一个**有名的人物，包括对话中仅被称呼的角色
+2. 同一人物的不同称呼只列一次，主名放 `n`，其他放 `a`
+3. 不要遗漏任何有名角色
+4. 不要编造不存在的人物
+
+## 输入文本
+
+{segments_text}
+
+请直接返回 JSON 数组。
 """
 
 # Max segment text per single LLM call.
@@ -368,13 +403,45 @@ class LLMExtractor:
         self._counters[type_key] = idx
         return idx
 
+    def _update_counters_from_objects(self, objects: list[dict]) -> None:
+        """Update _counters to reflect the highest IDs seen in expanded objects.
+
+        Ensures the next batch's expand_candidates call won't produce
+        IDs that collide with objects from earlier batches.
+        """
+        for obj in objects:
+            type_name = obj.get("type", "")
+            data = obj.get("data", {})
+            obj_id = data.get("id", "")
+            if not obj_id:
+                continue
+            # Extract the numeric suffix: doc_id_ent_0042 → 42
+            parts = obj_id.rsplit("_", 1)
+            if len(parts) == 2:
+                try:
+                    counter = int(parts[1])
+                except ValueError:
+                    continue
+                if type_name == "Entity":
+                    key = "ent"
+                elif type_name == "Event":
+                    key = "evt"
+                elif type_name == "Claim":
+                    key = "clm"
+                elif type_name == "Relation":
+                    key = "rel"
+                else:
+                    continue
+                current = self._counters.get(key, 0)
+                if counter > current:
+                    self._counters[key] = counter
+
     def extract_chapter(
         self,
         doc_id: str,
         chapter_num: int,
         chapter_title: str,
         segments: list[Segment],
-        existing_entities: dict[str, str] | None = None,
     ) -> list[dict]:
         """Extract semantic objects for one chapter, batching if segments are too long.
 
@@ -397,27 +464,38 @@ class LLMExtractor:
         self._cache_misses = 0
         self._cache_lookups = 0
         self._batch_timings = []
+        # Reset ID counters so each chapter starts from ent_0001, evt_0001, etc.
+        self._counters.clear()
 
         # Split into batches if total text is too long
         batches = self._batch_segments(segments)
         is_compact = self._protocol != _VERBOSE_EXTRACTOR_PROTOCOL
+
+        # Seed entities from previous chapters or cross-chapter seeding
+        seed = dict(self._seed_entities) if self._seed_entities else None
 
         # Single-batch fast path
         if len(batches) == 1:
             if is_compact:
                 return self._extract_batch_compact(
                     doc_id, chapter_num, chapter_title,
-                    segments, existing_entities, batch_index=0,
+                    segments, seed, batch_index=0,
                 )
-            return self._extract_batch(doc_id, chapter_num, chapter_title, segments, existing_entities)
+            return self._extract_batch(doc_id, chapter_num, chapter_title, segments)
 
         # Multi-batch: extract each batch, then merge
         all_objects: list[dict] = []
-        batch_entities = dict(existing_entities or {})
-        # Seed the cross-batch entity map with anything the caller pre-loaded
-        # (e.g. from a previous chapter's run).
-        if self._seed_entities:
-            batch_entities.update(self._seed_entities)
+        batch_entities = dict(seed or {})
+        # S6 Path A: Pass0 entity scan produces attention hints only —
+        # a plain list of entity names/kinds/aliases that the LLM should
+        # try to extract.  These are NOT merged into batch_entities (no
+        # ID assignment, no collision check).  They are passed to
+        # _build_compact_prompt as a separate "attention" section.
+        pass0_hints: list[dict] = []
+        if len(batches) > 1:
+            pass0_hints = self.scan_entities(doc_id, chapter_num, chapter_title, segments)
+            if pass0_hints:
+                logger.info("Pass0 entity scan: %d attention hints for Pass1", len(pass0_hints))
         pre_entity_count = len(batch_entities)
         truncated_batches = 0
 
@@ -436,6 +514,7 @@ class LLMExtractor:
                         objects = self._extract_batch_compact(
                             doc_id, chapter_num, chapter_title,
                             batch, batch_entities, batch_index=i,
+                            attention_hints=pass0_hints,
                         )
                     else:
                         objects = self._extract_batch(
@@ -499,10 +578,9 @@ class LLMExtractor:
         chapter_num: int,
         chapter_title: str,
         segments: list[Segment],
-        existing_entities: dict[str, str] | None = None,
     ) -> list[dict]:
         """Extract semantic objects for one batch of segments."""
-        prompt = self._build_prompt(doc_id, chapter_num, chapter_title, segments, existing_entities)
+        prompt = self._build_prompt(doc_id, chapter_num, chapter_title, segments, self._seed_entities)
         # Anthropic SDK requires streaming for max_tokens > 21,333 (10-min timeout
         # rule). We always try non-streaming first, fall back to streaming on the
         # SDK's ValueError, and re-aggregate the streamed events into a synthetic
@@ -590,6 +668,7 @@ class LLMExtractor:
         existing_entities: dict[str, str] | None,
         *,
         batch_index: int,
+        attention_hints: list[dict] | None = None,
     ) -> list[dict]:
         """Extract compact candidates and expand to verbose objects.
 
@@ -653,6 +732,7 @@ class LLMExtractor:
         # Build the compact prompt and call the model.
         prompt = self._build_compact_prompt(
             doc_id, chapter_num, chapter_title, segments, existing_entities,
+            attention_hints=attention_hints,
         )
         kwargs: dict[str, Any] = {
             "model": self._model,
@@ -698,7 +778,12 @@ class LLMExtractor:
         # Parse + expand
         objects = self._postprocess_compact_response(
             response_text, segments, doc_id,
+            next_ent_idx=self._counters.get("ent", 0) + 1,
+            next_evt_idx=self._counters.get("evt", 0) + 1,
+            next_clm_idx=self._counters.get("clm", 0) + 1,
         )
+        # Update counters so the next batch continues from where this one left off.
+        self._update_counters_from_objects(objects)
 
         # Cache store (only on read_write or refresh; never on read_only).
         if self._cache is not None and self._cache_mode in (
@@ -746,6 +831,10 @@ class LLMExtractor:
         response_text: str,
         segments: list[Segment],
         doc_id: str,
+        *,
+        next_ent_idx: int = 1,
+        next_evt_idx: int = 1,
+        next_clm_idx: int = 1,
     ) -> list[dict]:
         """Parse compact JSON, expand to verbose form, derive Relations.
 
@@ -755,6 +844,9 @@ class LLMExtractor:
         candidates = parse_compact_response(response_text)
         objects, expand_warnings = expand_candidates(
             candidates, segments, doc_id,
+            next_ent_idx=next_ent_idx,
+            next_evt_idx=next_evt_idx,
+            next_clm_idx=next_clm_idx,
         )
         for w in expand_warnings:
             logger.debug("Ch expand: %s", w)
@@ -806,12 +898,18 @@ class LLMExtractor:
             self._api_elapsed_sec += float(
                 entry.response.get("elapsed_sec", 0.0) or 0.0
             )
+            self._update_counters_from_objects(parsed)
             return list(parsed), []
         # Fall back: re-run the expander on the raw text.
-        return self._postprocess_compact_response(
+        objects = self._postprocess_compact_response(
             entry.response.get("raw_text", ""),
             segments, doc_id,
-        ), []
+            next_ent_idx=self._counters.get("ent", 0) + 1,
+            next_evt_idx=self._counters.get("evt", 0) + 1,
+            next_clm_idx=self._counters.get("clm", 0) + 1,
+        )
+        self._update_counters_from_objects(objects)
+        return objects, []
 
     def _build_compact_prompt(
         self,
@@ -820,21 +918,80 @@ class LLMExtractor:
         chapter_title: str,
         segments: list[Segment],
         existing_entities: dict[str, str] | None,
+        *,
+        attention_hints: list[dict] | None = None,
+        is_first_block: bool = False,
     ) -> str:
-        segments_formatted = "\n".join(
-            f"[{s.id}] {s.text_slice}" for s in segments
-        )
+        # P1-4: noise pre-filter — skip segments that are clearly not content
+        def _is_noise(seg: Segment) -> bool:
+            text = seg.text_slice.strip()
+            if not text:
+                return True
+            # Ultra-short: <3 chars and no sentence-ending punctuation
+            if len(text) < 3 and text[-1:] not in '。！？.!?':
+                return True
+            # OCR error: contains '?' in a short segment
+            if '?' in text and len(text) < 10:
+                return True
+            return False
+
+        clean_segments = [s for s in segments if not _is_noise(s)]
+
+        # P1-3: insert blank line between different block_index groups
+        parts: list[str] = []
+        prev_block: int | None = None
+        for s in clean_segments:
+            if prev_block is not None and s.block_index != prev_block:
+                parts.append("")  # blank line separator
+            parts.append(f"[{s.id}|{s.segment_type}] {s.text_slice}")
+            prev_block = s.block_index
+        segments_formatted = "\n".join(parts)
+
+        # Build "已知人物" section from entities already extracted by
+        # previous batches or previous chapters.  These have real IDs
+        # and ARE persisted — the LLM should reuse their IDs.
+        existing_section = ""
         if existing_entities:
-            lines = [f"- {eid}: {name}" for name, eid in existing_entities.items()]
-            existing_section = "## 已知人物（前几回已提取，直接复用其 ID）\n\n" + "\n".join(lines)
-        else:
-            existing_section = ""
+            from collections import OrderedDict
+            by_id: dict[str, list[str]] = OrderedDict()
+            for name, eid in existing_entities.items():
+                by_id.setdefault(eid, []).append(name)
+            lines = []
+            for eid, names in by_id.items():
+                primary = names[0]
+                aliases = names[1:]
+                if aliases:
+                    lines.append(f"- {eid} {primary}（别名: {', '.join(aliases)}）")
+                else:
+                    lines.append(f"- {eid} {primary}")
+            existing_section = "## 已知人物（前几回已提取，直接复用其 ID，不要重复创建）\n\n" + "\n".join(lines)
+
+        # Build "请确保提取" section from Pass0 attention hints.
+        # These are NOT persisted entities — they're just names that the
+        # LLM should pay extra attention to when scanning the text.
+        # The LLM creates them as normal Entity candidates with its own
+        # lid; no ID collision or suppression occurs.
+        hint_section = ""
+        if attention_hints:
+            hint_lines = []
+            for hint in attention_hints:
+                name = hint.get("name", "")
+                kind = hint.get("kind", "")
+                aliases = hint.get("aliases", [])
+                parts = [f"{name} ({kind})"]
+                if aliases:
+                    parts.append(f"别名: {', '.join(aliases)}")
+                hint_lines.append("- " + ", ".join(parts))
+            hint_section = "## 请确保提取（以下是全文中出现的人物，请逐一检查是否需要创建 Entity）\n\n" + "\n".join(hint_lines)
+
+        combined_section = existing_section + ("\n" if existing_section and hint_section else "") + hint_section
+
         return COMPACT_PROMPT_PREFIX + COMPACT_PROMPT_SUFFIX.format(
             doc_id=doc_id,
             chapter_num=chapter_num,
             chapter_title=chapter_title,
             segments_formatted=segments_formatted,
-            existing_entities_section=existing_section,
+            existing_entities_section=combined_section,
         )
 
     def _stream_response(self, kwargs: dict[str, Any]) -> Any:
@@ -962,6 +1119,173 @@ class LLMExtractor:
                 return block.text
         return None
 
+    def scan_entities(
+        self,
+        doc_id: str,
+        chapter_num: int,
+        chapter_title: str,
+        segments: list,
+    ) -> list[dict]:
+        """Pass0: Chunked entity scan before compact extraction.
+
+        Sends segment text in chunks (to avoid thinking-mode token exhaustion
+        on long inputs) and asks the LLM to return only an entity list.
+        This gives every subsequent batch a complete entity map, preventing
+        duplicates and improving recall.
+
+        Returns:
+            List of {"name": str, "kind": str, "aliases": [str]} dicts.
+            Used as attention hints for Pass1 — no IDs assigned.
+        """
+        chunks = self._batch_segments(segments)
+        all_entities: list[dict] = []
+        seen_names: set[str] = set()
+
+        for chunk_idx, chunk in enumerate(chunks):
+            segments_text = "\n".join(f"[{s.id}|{s.segment_type}] {s.text_slice}" for s in chunk)
+            prompt = ENTITY_SCAN_PROMPT.format(segments_text=segments_text)
+
+            try:
+                response = self._call_llm_no_thinking(prompt, max_tokens=8192)
+            except Exception as exc:
+                logger.warning("Pass0 chunk %d failed: %s: %s — skipping",
+                             chunk_idx, type(exc).__name__, exc)
+                continue
+
+            if not response:
+                logger.warning("Pass0 chunk %d: empty response", chunk_idx)
+                continue
+
+            chunk_entities = self._parse_entity_scan_list(response)
+            for ent in chunk_entities:
+                name = ent.get("name", "")
+                if name and name not in seen_names:
+                    all_entities.append(ent)
+                    seen_names.add(name)
+
+        logger.info("Pass0 entity scan: %d entities across %d chunks",
+                    len(all_entities), len(chunks))
+        return all_entities
+
+
+    def _parse_entity_scan_list(self, response: str) -> list[dict]:
+        """Parse the JSON entity array from Pass0 scan.
+
+        Returns list of {"name": str, "kind": str, "aliases": [str]} dicts
+        for use as attention hints.  No IDs are assigned.
+        """
+        import json
+        text = response.strip()
+        # Strip markdown fences
+        fence_match = re.search(r'```(?:json)?\s*\n(.*?)\n```', text, re.DOTALL)
+        if fence_match:
+            text = fence_match.group(1)
+        # Strip JS-style comments (LLM sometimes adds // notes)
+        text = re.sub(r'//[^\n]*', '', text)
+        # Find JSON array
+        bracket_start = text.find('[')
+        if bracket_start == -1:
+            return []
+        bracket_end = text.rfind(']')
+        if bracket_end == -1:
+            return []
+        # Try full parse
+        try:
+            items = json.loads(text[bracket_start:bracket_end+1])
+            if isinstance(items, list):
+                return self._normalize_scan_items(items)
+        except json.JSONDecodeError:
+            pass
+        # Truncated response recovery
+        last_complete = text.rfind('},')
+        if last_complete == -1:
+            last_complete = text.rfind('}]')
+        if last_complete == -1:
+            return []
+        recovered = text[bracket_start:last_complete+1] + ']'
+        try:
+            items = json.loads(recovered)
+            if isinstance(items, list):
+                return self._normalize_scan_items(items)
+        except json.JSONDecodeError:
+            return []
+        return []
+
+    @staticmethod
+    def _normalize_scan_items(items: list) -> list[dict]:
+        """Convert raw Pass0 JSON items to attention-hint dicts.
+
+        Input: [{"n":"甄士隐","k":"person","a":["士隐"]}, ...]
+        Output: [{"name":"甄士隐","kind":"person","aliases":["士隐"]}, ...]
+        """
+        result: list[dict] = []
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            name = item.get("n", "").strip()
+            if not name:
+                continue
+            kind = item.get("k", "person").strip()
+            aliases = [
+                a.strip() for a in item.get("a", [])
+                if isinstance(a, str) and a.strip()
+            ]
+            result.append({"name": name, "kind": kind, "aliases": aliases})
+        return result
+
+    def _call_llm_no_thinking(self, prompt: str, max_tokens: int = 8192) -> str:
+        """LLM call with thinking explicitly disabled (for Pass0 entity scan).
+
+        DeepSeek-V4-Flash may auto-enable thinking even when not requested,
+        which can consume all output tokens on long inputs. This method
+        explicitly disables thinking and uses a higher max_tokens.
+        """
+        messages = [{"role": "user", "content": prompt}]
+        kwargs = dict(
+            model=self._model,
+            messages=messages,
+            max_tokens=max_tokens,
+        )
+        try:
+            resp = self._client.messages.create(**kwargs)
+        except TypeError:
+            # Some models don't support extra kwargs — retry without
+            resp = self._client.messages.create(
+                model=self._model, messages=messages, max_tokens=max_tokens,
+            )
+        # Extract text from response (skip thinking blocks)
+        text_parts = []
+        for block in resp.content:
+            if getattr(block, "type", None) == "text":
+                text_parts.append(block.text)
+        if text_parts:
+            return "\n".join(text_parts)
+        logger.warning("_call_llm_no_thinking: no text blocks in response")
+        return ""
+
+    def _call_llm(self, prompt: str, max_tokens: int = 8192) -> str:
+        """Low-level LLM call for Pass0 and similar single-turn uses."""
+        messages = [{"role": "user", "content": prompt}]
+        kwargs = dict(
+            model=self._model,
+            messages=messages,
+            max_tokens=max_tokens,
+        )
+        # Don't use thinking for entity scan — it wastes output tokens
+        resp = self._client.messages.create(**kwargs)
+        # Extract text from response (skip thinking blocks)
+        text_parts = []
+        for block in resp.content:
+            if getattr(block, "type", None) == "text":
+                text_parts.append(block.text)
+        if text_parts:
+            return "\n".join(text_parts)
+        # Fallback: check if response was truncated (only thinking, no text)
+        stop_reason = getattr(resp, "stop_reason", None)
+        if stop_reason == "max_tokens":
+            logger.warning("_call_llm: response truncated at max_tokens=%d (only thinking blocks returned)", max_tokens)
+        return ""
+
     def _batch_segments(self, segments: list[Segment]) -> list[list[Segment]]:
         """Split segments into batches that fit within context limits."""
         total_chars = sum(len(s.text_slice) for s in segments)
@@ -995,11 +1319,23 @@ class LLMExtractor:
         existing_entities: dict[str, str] | None,
     ) -> str:
         segments_formatted = "\n".join(
-            f"[{s.id}] {s.text_slice}" for s in segments
+            f"[{s.id}|{s.segment_type}] {s.text_slice}" for s in segments
         )
         if existing_entities:
-            lines = [f"- {eid}: {name}" for name, eid in existing_entities.items()]
-            existing_section = "## 已知人物（前几回已提取，直接复用其 ID）\n\n" + "\n".join(lines)
+            # Group by entity ID: collect all names/aliases for the same entity
+            from collections import OrderedDict
+            by_id: dict[str, list[str]] = OrderedDict()
+            for name, eid in existing_entities.items():
+                by_id.setdefault(eid, []).append(name)
+            lines = []
+            for eid, names in by_id.items():
+                primary = names[0]
+                aliases = names[1:]
+                if aliases:
+                    lines.append(f"- {eid} {primary}（别名: {', '.join(aliases)}）")
+                else:
+                    lines.append(f"- {eid} {primary}")
+            existing_section = "## 已知人物（前几回已提取，直接复用其 ID，不要重复创建）\n\n" + "\n".join(lines)
         else:
             existing_section = ""
 

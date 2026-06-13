@@ -179,14 +179,14 @@ class TestExtractChapterMocked:
         mock_client.messages.create.return_value = mock_message
 
         extractor = LLMExtractor(_client=mock_client, extractor_protocol="verbose-v1", cache_mode="off")
-        segments = [_make_segment()]
         existing = {"甄士隐": "hongloumeng_ent_0001"}
+        extractor._seed_entity_map(existing)
+        segments = [_make_segment()]
         objects = extractor.extract_chapter(
             doc_id="hongloumeng",
             chapter_num=2,
             chapter_title="第二回",
             segments=segments,
-            existing_entities=existing,
         )
 
         # Verify prompt includes existing entities section
