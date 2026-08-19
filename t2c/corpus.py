@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import hashlib
+import os
 import re
 from datetime import datetime, timezone
 from pathlib import Path
@@ -13,6 +14,22 @@ def compute_hash(text: str) -> str:
     """SHA-256 hash of text, prefixed with 'sha256:'."""
     digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
     return f"sha256:{digest}"
+
+
+def content_timestamp(text_hash: str) -> str:
+    """Deterministic content-derived timestamp for reproducible builds.
+
+    T2C is a compiler: the same input must produce byte-identical output
+    (the v6.0 rebuild gate). A wall-clock timestamp would break that, so
+    created_at is derived from the content hash. Set T2C_SOURCE_DATE_EPOCH
+    (seconds since epoch) to pin a real date instead.
+    """
+    epoch = os.environ.get("T2C_SOURCE_DATE_EPOCH")
+    if epoch:
+        seconds = int(epoch)
+    else:
+        seconds = int(text_hash.removeprefix("sha256:")[:8], 16)
+    return datetime.fromtimestamp(seconds, timezone.utc).isoformat()
 
 
 class CorpusManager:
@@ -40,7 +57,7 @@ class CorpusManager:
 
     def _make_document(self, doc_id: str, source_path: str, text: str) -> Document:
         raw_text_hash = compute_hash(text)
-        created_at = datetime.now(timezone.utc).isoformat()
+        created_at = content_timestamp(raw_text_hash)
         # block_count is computed after create_blocks, set placeholder 0
         return Document(
             id=doc_id,

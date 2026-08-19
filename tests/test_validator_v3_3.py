@@ -86,8 +86,15 @@ def _event(evt_id: str = "evt1", participants: list[str] | None = None, seg_ids:
             "kind": "occurrence",
             "participants": participants or ["ent1"],
             "source_segment_ids": seg_ids or ["seg1"],
+            # v6.0 M3 evidence gate: Claim/Event must carry evidence
+            "evidence_refs": [_evidence()],
         },
     }
+
+
+def _evidence() -> dict:
+    # matches _seg()'s default text "甄士隐住在姑苏城中。"[0:3]
+    return {"segment_id": "seg1", "start": 0, "end": 3, "quote_hash": _sha256("甄士隐")}
 
 
 def _claim(clm_id: str = "clm1", subject: str = "ent1", obj: str = "ent2", seg_ids: list[str] | None = None) -> dict:
@@ -101,6 +108,7 @@ def _claim(clm_id: str = "clm1", subject: str = "ent1", obj: str = "ent2", seg_i
             "modality": "asserted",
             "polarity": "positive",
             "source_segment_ids": seg_ids or ["seg1"],
+            "evidence_refs": [_evidence()],
         },
     }
 

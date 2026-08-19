@@ -132,6 +132,13 @@ class Pipeline:
             chapter_title=chapter_title,
             segments=all_segments,
         )
+        # v6.0 M3: programmatic entity resolution — merge cross-batch
+        # duplicate entities (same name/alias) before validation, so the
+        # reference graph is built over canonical ids.
+        from t2c.compact_candidate import resolve_duplicate_entities
+        objects, resolution_warnings = resolve_duplicate_entities(objects)
+        for w in resolution_warnings:
+            logger.info("resolution: %s", w)
         result.objects = objects
         # v3.4.1: capture extraction telemetry
         result.batches_truncated = 1 if getattr(self._extractor, "_last_batch_truncated", False) else 0

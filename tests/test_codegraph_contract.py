@@ -117,3 +117,14 @@ def test_dangling_fk_fails_at_codegen(tmp_path):
             doc=doc, blocks=blocks, segments=segments,
             claims=[bad_claim], output_dir=tmp_path / "book2",
         )
+
+
+def test_rebuild_is_byte_identical(tmp_path):
+    """Rebuild gate: same input compiled twice → byte-identical package."""
+    pkg1 = _compile_fixture(tmp_path / "r1")
+    pkg2 = _compile_fixture(tmp_path / "r2")
+    files1 = {p.name: p.read_bytes() for p in sorted(pkg1.glob("*.py"))}
+    files2 = {p.name: p.read_bytes() for p in sorted(pkg2.glob("*.py"))}
+    assert set(files1) == set(files2)
+    for name in files1:
+        assert files1[name] == files2[name], f"{name} differs between rebuilds"

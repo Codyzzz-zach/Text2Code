@@ -603,6 +603,20 @@ class Validator:
                                     f"evidence_refs[{i}] quote_hash mismatch for segment {seg_id}[{start}:{end}]"
                                 )
 
+            # v6.0 M3 evidence-presence gate: a Claim/Event without evidence
+            # must not stand as fact — it degrades to Residual via the
+            # repair loop. (inferred claims are backed by derived_from
+            # instead of direct evidence.)
+            if type_name in ("Claim", "Event"):
+                if data.get("modality") == "inferred":
+                    continue
+                if not data.get("evidence_refs"):
+                    errors.append(
+                        f"Evidence error in {type_name} ({obj_id}): "
+                        f"no evidence_refs — object must degrade to Residual "
+                        f"rather than stand as fact"
+                    )
+
         return errors, warnings
 
     # -- Claim Safety validation -----------------------------------------

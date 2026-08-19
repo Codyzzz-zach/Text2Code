@@ -1145,16 +1145,41 @@ class LLMExtractor:
             segments_text = "\n".join(f"[{s.id}|{s.segment_type}] {s.text_slice}" for s in chunk)
             prompt = ENTITY_SCAN_PROMPT.format(segments_text=segments_text)
 
-            try:
-                response = self._call_llm_no_thinking(prompt, max_tokens=8192)
-            except Exception as exc:
-                logger.warning("Pass0 chunk %d failed: %s: %s — skipping",
-                             chunk_idx, type(exc).__name__, exc)
-                continue
-
-            if not response:
-                logger.warning("Pass0 chunk %d: empty response", chunk_idx)
-                continue
+            # v6.0: Pass0 honors the cache contract — read_only must never
+            # touch the network. The "purpose" option keeps Pass0 keys from
+            # colliding with main extraction batches over the same segments.
+            cache_key = compute_cache_key(
+                doc_id=doc_id,
+                chapter_num=chapter_num,
+                chapter_title=chapter_title,
+                batch_index=chunk_idx,
+                segment_ids=[s.id for s in chunk],
+                segment_hashes=[s.hash for s in chunk],
+                known_entities=None,
+                model=self._model,
+                prompt_version=self._prompt_version,
+                extractor_protocol=self._protocol,
+                options={"purpose": "entity_scan", "max_tokens": 8192, "temperature": 0},
+            )
+            if self._cache is not None and self._cache_mode != CacheMode.OFF:
+                entry = self._cache.lookup(cache_key)
+                if entry is not None and self._cache_mode != CacheMode.REFRESH:
+                    response = entry.response.get("raw_text", "")
+                    if not response:
+                        logger.warning("Pass0 chunk %d: empty cached response", chunk_idx)
+                        continue
+                elif self._cache_mode == CacheMode.READ_ONLY:
+                    logger.info("Pass0 chunk %d: read_only cache miss — skipping", chunk_idx)
+                    continue
+                else:
+                    response = self._call_pass0(chunk_idx, prompt)
+                    if not response:
+                        continue
+                    self._store_pass0_cache(cache_key, chunk, prompt, response)
+            else:
+                response = self._call_pass0(chunk_idx, prompt)
+                if not response:
+                    continue
 
             chunk_entities = self._parse_entity_scan_list(response)
             for ent in chunk_entities:
@@ -1232,6 +1257,53 @@ class LLMExtractor:
             ]
             result.append({"name": name, "kind": kind, "aliases": aliases})
         return result
+
+    def _call_pass0(self, chunk_idx: int, prompt: str) -> str:
+        """Call the LLM for one Pass0 chunk, tolerating failures (returns "")."""
+        try:
+            return self._call_llm_no_thinking(prompt, max_tokens=8192)
+        except Exception as exc:
+            logger.warning("Pass0 chunk %d failed: %s: %s — skipping",
+                         chunk_idx, type(exc).__name__, exc)
+            return ""
+
+    def _store_pass0_cache(
+        self, cache_key: str, chunk: list, prompt: str, response: str
+    ) -> None:
+        """Persist a Pass0 entity-scan response (read_write / refresh only)."""
+        if self._cache is None or self._cache_mode not in (
+            CacheMode.READ_WRITE, CacheMode.REFRESH,
+        ):
+            return
+        entry = CacheEntry(
+            cache_schema="t2c-llm-cache-v1",
+            cache_key=cache_key,
+            created_at=LLMCache.now_iso(),
+            request={
+                "model": self._model,
+                "prompt_version": self._prompt_version,
+                "extractor_protocol": self._protocol,
+                "purpose": "entity_scan",
+                "segments": [
+                    {"id": s.id, "hash": s.hash, "text": s.text_slice}
+                    for s in chunk
+                ],
+                "known_entities": {},
+            },
+            response={
+                "raw_text": response,
+                "parsed_candidates": [],
+                "stop_reason": "end_turn",
+                "input_tokens": 0,
+                "output_tokens": 0,
+                "elapsed_sec": 0.0,
+            },
+            quality={"parse_ok": bool(response), "truncated": False},
+        )
+        try:
+            self._cache.store(entry)
+        except (OSError, TypeError, ValueError) as exc:
+            logger.warning("LLMCache: failed to write Pass0 %s: %s", cache_key, exc)
 
     def _call_llm_no_thinking(self, prompt: str, max_tokens: int = 8192) -> str:
         """LLM call with thinking explicitly disabled (for Pass0 entity scan).

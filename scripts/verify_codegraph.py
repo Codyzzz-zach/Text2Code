@@ -288,7 +288,75 @@ def _break_symbol(pkg: Path, symbol: str) -> tuple[bool, str]:
         return True, f"import failed as expected after removing {symbol!r} ({err})"
 
 
-def verify_package(pkg: Path) -> dict:
+def _check_zero_dangling(trees: dict[str, ast.Module]) -> list[str]:
+    """Artifact-level zero-dangling gate (M3): every segment id referenced
+    anywhere in the package (segment_id / source_segment_ids /
+    requires_raw_fallback kwargs) must be defined by a Segment in text.py.
+
+    This catches cross-namespace pollution (e.g. cached objects carrying
+    another document's segment ids) that string-based references allow.
+    """
+    seg_ids: set[str] = set()
+    text_tree = trees.get("text.py")
+    if text_tree is None:
+        return ["no text.py in package"]
+    for node in ast.walk(text_tree):
+        if isinstance(node, ast.Call):
+            ctor = node.func
+            if isinstance(ctor, ast.Name) and ctor.id == "Segment":
+                for kw in node.keywords:
+                    if kw.arg == "id" and isinstance(kw.value, ast.Constant):
+                        seg_ids.add(kw.value.value)
+
+    def check_value(value: ast.expr, where: str, problems: list[str]) -> None:
+        if isinstance(value, ast.Constant) and isinstance(value.value, str):
+            if value.value not in seg_ids:
+                problems.append(f"{where}: dangling segment id {value.value!r}")
+        elif isinstance(value, ast.List):
+            for elt in value.elts:
+                check_value(elt, where, problems)
+
+    problems: list[str] = []
+    watched = {"segment_id", "source_segment_ids", "requires_raw_fallback"}
+    for fname, tree in trees.items():
+        if fname == "__init__.py":
+            continue
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            for kw in node.keywords:
+                if kw.arg in watched:
+                    check_value(kw.value, f"{fname}:{kw.arg}@line{node.lineno}", problems)
+    return problems
+
+
+def _check_pyright(pkg: Path) -> tuple[bool, object]:
+    """C8: Pyright must report 0 errors on the generated package."""
+    exe = shutil.which("pyright")
+    if exe is None:
+        return False, "pyright not installed (pip install pyright)"
+    import subprocess
+
+    proc = subprocess.run(
+        [exe, "--outputjson", str(pkg)],
+        capture_output=True, text=True, timeout=600,
+        cwd=str(pkg.parent),
+    )
+    try:
+        data = json.loads(proc.stdout)
+    except json.JSONDecodeError:
+        return False, f"pyright produced no JSON: {proc.stderr[:500]}"
+    summary = data.get("summary", {})
+    errors = summary.get("errorCount", -1)
+    diags = [
+        f"{d.get('file', '?')}:{d.get('range', {}).get('start', {}).get('line', '?')}: {d.get('message', '')[:120]}"
+        for d in data.get("generalDiagnostics", [])
+        if d.get("severity") == "error"
+    ][:10]
+    return errors == 0, {"error_count": errors, "sample_errors": diags}
+
+
+def verify_package(pkg: Path, *, with_pyright: bool = False) -> dict:
     pkg = pkg.resolve()
     report: dict = {"package": str(pkg), "checks": {}, "ok": True}
 
@@ -359,6 +427,14 @@ def verify_package(pkg: Path) -> dict:
         "problems": arr_problems,
     })
 
+    # M3: artifact-level zero-dangling gate — every referenced segment id
+    # must be defined in this package's own text.py.
+    dangling = _check_zero_dangling(trees)
+    record("REF_zero_dangling", not dangling, {
+        "dangling_count": len(dangling),
+        "samples": dangling[:10],
+    })
+
     # C7: package-level import surface
     ok, err = _import_package(pkg)
     record("C7_package_import", ok, err)
@@ -394,6 +470,11 @@ def verify_package(pkg: Path) -> dict:
         "checked": checked, "ok": ok_n, "problems": replay_problems[:10],
     })
 
+    # C8: Pyright type check (independent re-verification; opt-in)
+    if with_pyright:
+        ok, detail = _check_pyright(pkg)
+        record("C8_pyright", ok, detail)
+
     return report
 
 
@@ -402,9 +483,10 @@ def main() -> int:
     ap.add_argument("package", type=Path, help="Generated package directory")
     ap.add_argument("--json", action="store_true", help="Machine-readable output")
     ap.add_argument("--break-symbol", default=None, help="Run C10 negative test on this symbol")
+    ap.add_argument("--pyright", action="store_true", help="Also run Pyright (C8) — fails if pyright is not installed")
     args = ap.parse_args()
 
-    report = verify_package(args.package)
+    report = verify_package(args.package, with_pyright=args.pyright)
 
     if args.break_symbol:
         ok, msg = _break_symbol(args.package.resolve(), args.break_symbol)

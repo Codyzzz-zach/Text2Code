@@ -719,6 +719,157 @@ def derive_relations(
 
 
 # ---------------------------------------------------------------------------
+# Entity resolution (program-side, v6.0 M3)
+# ---------------------------------------------------------------------------
+
+
+def resolve_duplicate_entities(
+    objects: list[dict],
+) -> tuple[list[dict], list[str]]:
+    """Merge Entity objects that share a name/alias (cross-batch duplicates).
+
+    LLM batches each create their own entity for the same character
+    (e.g. 贾珠 extracted independently in batch 1 and batch 4). Duplicates
+    fork the reference graph: claims split across two ids, and codegen would
+    emit `ent_x` / `ent_x_1` symbol pairs for one person.
+
+    Rules:
+      - Canonical = earliest entity (smallest id) claiming a name token.
+      - A token is an entity's name or any of its aliases; a later entity is
+        merged when any of its tokens is already claimed.
+      - Merged entity: union of aliases / source_segment_ids / evidence_refs
+        (deduped, deterministically ordered); canonical keeps its own
+        id/name/kind.
+      - All references (Event.participants, Claim/Relation subject/object,
+        Claim.source) are rewritten to the canonical id.
+      - Claims that become self-referential through a merge (subject ==
+        object) are dropped — they carry no information (baseline defect D3).
+      - Relations are re-deduped by (subject, predicate, object) after
+        rewriting, merging their evidence_refs.
+
+    Returns (objects, warnings). Deterministic: everything iterates in
+    id-sorted order.
+    """
+    warnings: list[str] = []
+    entities = sorted(
+        (o for o in objects if o.get("type") == "Entity"),
+        key=lambda o: o["data"].get("id", ""),
+    )
+    others = [o for o in objects if o.get("type") != "Entity"]
+    if not entities:
+        return objects, warnings
+
+    token_owner: dict[str, dict] = {}
+    canonical_of: dict[str, str] = {}  # dup entity id → canonical entity id
+    kept: list[dict] = []
+
+    for ent in entities:
+        data = ent["data"]
+        tokens = [data.get("name", ""), *data.get("aliases", [])]
+        owner = next((token_owner[t] for t in tokens if t in token_owner), None)
+        if owner is None:
+            kept.append(ent)
+            for t in tokens:
+                if t:
+                    token_owner[t] = data
+            continue
+
+        # Merge `data` into the owner's data
+        canonical_of[data["id"]] = owner["id"]
+        owner_aliases = owner.setdefault("aliases", [])
+        for alias in [data.get("name", ""), *data.get("aliases", [])]:
+            if alias and alias != owner.get("name") and alias not in owner_aliases:
+                owner_aliases.append(alias)
+        merged_sids = sorted(set(owner.get("source_segment_ids", []))
+                             | set(data.get("source_segment_ids", [])))
+        owner["source_segment_ids"] = merged_sids
+        owner_refs = owner.setdefault("evidence_refs", [])
+        for ref in data.get("evidence_refs", []):
+            if ref not in owner_refs:
+                owner_refs.append(ref)
+        # The merged entity's tokens now also resolve to the canonical one
+        for t in tokens:
+            if t:
+                token_owner[t] = owner
+        warnings.append(
+            f"entity resolved: {data.get('name')!r} ({data['id']}) merged into "
+            f"{owner.get('name')!r} ({owner['id']})"
+        )
+
+    if not canonical_of:
+        return objects, warnings
+
+    # Rewrite references in non-entity objects
+    def rw(value: Any) -> Any:
+        return canonical_of.get(value, value) if isinstance(value, str) else value
+
+    final: list[dict] = list(kept)
+    dropped_self_claims = 0
+    for obj in others:
+        type_name = obj.get("type", "")
+        data = obj.get("data", {})
+        if type_name == "Event":
+            data["participants"] = [rw(p) for p in data.get("participants", [])]
+        if type_name in ("Claim", "Relation"):
+            data["subject"] = rw(data.get("subject"))
+            if data.get("object") is not None:
+                data["object"] = rw(data.get("object"))
+        if type_name == "Claim":
+            if data.get("source"):
+                data["source"] = rw(data["source"])
+            if data.get("subject") and data["subject"] == data.get("object"):
+                dropped_self_claims += 1
+                warnings.append(
+                    f"claim {data.get('id')} dropped: self-referential after "
+                    f"entity merge ({data.get('subject')})"
+                )
+                continue
+        final.append(obj)
+
+    if dropped_self_claims:
+        # Relations pointing at dropped claims are dangling — remove them,
+        # then re-dedup by (subject, predicate, object).
+        live_claim_ids = {
+            o["data"]["id"] for o in final if o.get("type") == "Claim"
+        }
+        final = [
+            o for o in final
+            if not (
+                o.get("type") == "Relation"
+                and o["data"].get("claim_id") not in live_claim_ids
+            )
+        ]
+
+    # Re-dedup relations that became identical through the merge
+    seen_rel: dict[tuple, dict] = {}
+    deduped: list[dict] = []
+    for obj in final:
+        if obj.get("type") != "Relation":
+            deduped.append(obj)
+            continue
+        data = obj["data"]
+        key = (data.get("subject"), data.get("predicate"), data.get("object"))
+        if key in seen_rel:
+            existing = seen_rel[key]["data"].setdefault("evidence_refs", [])
+            for ref in data.get("evidence_refs", []):
+                if ref not in existing:
+                    existing.append(ref)
+            warnings.append(
+                f"relation {data.get('id')} merged into "
+                f"{seen_rel[key]['data'].get('id')} after entity resolution"
+            )
+            continue
+        seen_rel[key] = obj
+        deduped.append(obj)
+
+    warnings.append(
+        f"entity resolution: {len(canonical_of)} duplicate(s) merged, "
+        f"{dropped_self_claims} self-referential claim(s) dropped"
+    )
+    return deduped, warnings
+
+
+# ---------------------------------------------------------------------------
 # v3.3 symbol assignment — REMOVED in v6.0 (M1).
 #
 # Symbols are now assigned exactly once, at the compile choke point, by
@@ -777,4 +928,5 @@ __all__ = [
     "expansion_failures_to_residuals",
     "locate_quote",
     "parse_compact_response",
+    "resolve_duplicate_entities",
 ]

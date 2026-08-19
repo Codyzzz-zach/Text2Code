@@ -1,8 +1,7 @@
 """Coverage — auto-derive coverage report for a document's segments."""
 from __future__ import annotations
 
-from datetime import datetime, timezone
-
+from t2c.corpus import content_timestamp
 from t2c.object_store import ObjectStore
 from t2c.ontology import CoverageReport
 
@@ -24,13 +23,18 @@ class CoverageGenerator:
             if self._requires_raw_fallback(seg_id, status):
                 requires_raw_fallback.append(seg_id)
 
+        # Deterministic timestamp (rebuild gate): reuse the document's
+        # content-derived created_at rather than wall-clock time.
+        docs = list(self._store.query("Document", id=doc_id))
+        generated_at = docs[0].created_at if docs else content_timestamp("")
+
         return CoverageReport(
             id=f"{doc_id}_coverage",
             doc_id=doc_id,
             total_segments=total,
             status_counts=status_counts,
             requires_raw_fallback=requires_raw_fallback,
-            generated_at=datetime.now(timezone.utc).isoformat(),
+            generated_at=generated_at,
         )
 
     def _segment_status(self, segment_id: str) -> str:
