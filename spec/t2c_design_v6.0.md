@@ -1,6 +1,7 @@
 # Text2Code 设计说明书 v6.0：边界再收敛与 CodeGraph 能力矩阵
 
 > **Status**: 当前权威 spec（supersedes v5.0 优化方案；历史文档见 spec/archive/）
+> **实现状态**: M1+M2+M3 已完成（commits 5bd2759 / c68a320）——能力矩阵在 golden fixture 上全绿
 > **Date**: 2026-08-19
 > **一句话**: T2C 只做一件事——把文本编译成 Python Knowledge Code 包，且该包被 codegraph 工具链 100% 利用。
 > **验收公式**: 对 golden fixture（红楼梦 1-3 回），能力矩阵 C1–C12 全绿，由验证脚本在每次 compile 强制复验。
