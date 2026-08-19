@@ -57,19 +57,23 @@ t2c compile-library --llm --cache-mode read_only --json
 
 Use `refresh` only when the user explicitly accepts a fresh LLM call.
 
-6. After compilation, evaluate:
+6. After compilation, verify the artifact against the v6.0 codegraph contract:
 
 ```bash
-python scripts/test_matrix.py quality --json
+python scripts/verify_codegraph.py output_code/<book> --pyright
 ```
 
 Report at least:
 
-- `grounding_rate`
-- `reference_issue_count`
-- `entity_conflict_count`
-- `coverage_rate`
-- `total_issue_count`
+- `ARR` (ast_reference_rate — must be 1.0)
+- `REF_zero_dangling` (dangling_count must be 0)
+- `C11_evidence_presence` (Claim/Event evidence rate)
+- `C12_hash_replay` (quote-hash replay over segment text)
+- `C8_pyright` (error_count must be 0)
+
+Legacy note: `scripts/test_matrix.py quality` evaluates the historical
+`examples/knowledge/` fixtures, not freshly compiled output. Do not treat
+its numbers as acceptance for new compiles.
 
 7. Treat generated `.py` files as the source of truth for downstream codegraph tools.
 Internal `ObjectStore`, graph helpers, and old scripts are implementation details unless

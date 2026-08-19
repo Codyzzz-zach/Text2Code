@@ -432,7 +432,8 @@ class Validator:
         if ref_value is None:
             return
 
-        # v3.3: skip __symbol__ markers — validated by _validate_symbol_references
+        # __symbol__ markers come from the parser's symbol-ref syntax; in v6.0
+        # the generated package's references are import-validated instead.
         if self._is_symbol_marker(ref_value):
             return
 

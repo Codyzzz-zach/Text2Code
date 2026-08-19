@@ -104,32 +104,52 @@ output_code/红楼梦/
 └── coverage.py        # 覆盖率报告
 ```
 
-**示例输出** — 一个关于实体的声明，完全可溯源：
+**示例输出** — 一个关于实体的声明，完全可溯源（摘自真实产物）：
 
 ```python
 # entities.py
-from .text import seg_0021
+from t2c.ontology import Entity, EvidenceRef
+from .text import seg_0102, seg_0107, seg_0146, ...
 
-ent_zh_64e599 = Entity(id='hlm_ent_0006', name='甄士隐', kind='person',
-    evidence_refs=[EvidenceRef(segment_id='hlm_seg_0021', start=0, end=3,
-                               quote_hash='sha256:ae447e...')],
-)  # 甄士隐 (person)
+ent_zh_9d88d8 = Entity(
+    id='红楼梦1_3_ent_0001',
+    symbol='ent_zh_9d88d8',        # 自声明符号
+    name='女娲氏',
+    kind='person',
+    ...
+)  # 女娲氏 (person)
 
 # claims.py
-from .entities import ent_zh_64e599, ent_zh_1fba96
+from t2c.ontology import Claim, EvidenceRef
+from .entities import ent_zh_692c5f, ent_zh_ed17f5, ...   # 真实活 import
+from .text import seg_0099, ...
 
-claim_ent0006_at_ent0002 = Claim(id='hlm_clm_0001',
-    subject='hlm_ent_0006', predicate='lives_in', object='hlm_ent_0002',
-    modality='asserted', polarity='positive',
-)  # hlm_ent_0006 lives_in hlm_ent_0002
+claim_zh_37b1d1 = Claim(
+    id='红楼梦1_3_clm_0005',
+    symbol='claim_zh_37b1d1',
+    subject='红楼梦1_3_ent_0007',          # 数据面：字符串 ID
+    subject_symbol=ent_zh_ed17f5,          # 导航面：AST bare Name（真实引用边）
+    predicate='is_child_of',
+    object='红楼梦1_3_ent_0005',
+    object_symbol=ent_zh_692c5f,
+    modality='reported',
+    polarity='positive',
+    evidence_refs=[EvidenceRef(
+        segment_id='红楼梦1_3_seg_0099',
+        segment_symbol=seg_0099,           # 证据也带引用边
+        start=11, end=14,
+        quote_hash='sha256:...',
+    )],
+)  # 红楼梦1_3_ent_0007 is_child_of 红楼梦1_3_ent_0005
 ```
 
 关键特性：
-- **稳定符号**（`ent_zh_64e599 = Entity(...)`）— CodeGraph 通过 Python AST 索引对象边界
-- **Pydantic 安全引用**（`subject='hlm_ent_0006'`）— 生成包可以作为普通 Python import 和校验
-- **跨文件导入**（`from .entities import ent_zh_64e599`）— 代码工具可发现包内关系
-- **行内注释**（`# 甄士隐 (person)`）— FTS5 全文搜索可命中中文名称
-- **证据溯源** — 每个声明回链到原文精确偏移
+- **数据面/导航面分离** — FK 字段保持字符串 ID（Pydantic 安全），`*_symbol` 字段是真实 AST 引用（find-references / go-to-definition 生效）
+- **import 即验证** — 悬空引用 = ImportError，坏包根本无法被加载
+- **包级符号面** — `__init__.py` 全量 re-export + `__all__`，`from <书名> import ent_zh_xxxx` 直接可用
+- **行内注释**（`# 女娲氏 (person)`）— FTS5 全文搜索可命中中文名称
+- **证据溯源** — 每条声明回链到原文精确偏移，hash 可程序化回放
+- **可重现构建** — 相同输入 + 缓存 → 字节一致的输出（rebuild gate）
 
 <p align="right">(<a href="#readme-top">回到顶部</a>)</p>
 
@@ -239,7 +259,8 @@ Text2Code/
 │   ├── compile_target.py       # 多文件编译
 │   ├── validator.py            # 12-gate 校验
 │   ├── compact_candidate.py    # 紧凑协议解析与展开
-│   ├── ontology.py             # Pydantic 类型系统（11 个模型）
+│   ├── ontology.py             # Pydantic 类型系统（symbol 自声明 + 解包 validator）
+│   ├── symbols.py              # v6.0：单点 symbol 分配（全包唯一、确定性）
 │   ├── schema.py               # Schema 校验层
 │   ├── claim_safety.py         # 6 条认识论安全规则
 │   ├── llm_config.py           # 多提供商 LLM 配置
@@ -253,9 +274,8 @@ Text2Code/
 │   ├── graph_api.py            # 历史/实验 graph 查询 helper
 │   └── object_store.py         # 内部 staging store
 ├── tests/                      # 测试套件
-├── scripts/                    # 提取脚本与工具
-├── spec/                       # 设计文档
-│   ├── t2c_design_v4.0.md      # 当前版本设计
+├── scripts/                    # 提取脚本与工具（verify_codegraph.py = v6.0 验收门禁）
+├── spec/                       # 设计文档（t2c_design_v6.0.md = 当前权威 spec；archive/ = 历史）
 ├── .env.example                # 环境变量模板
 └── pyproject.toml
 ```

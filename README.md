@@ -104,32 +104,52 @@ output_code/hongloumeng/
 └── coverage.py        # Coverage report
 ```
 
-**Example output** — a claim about an entity, fully traceable:
+**Example output** — a claim about an entity, fully traceable (from a real compiled package):
 
 ```python
 # entities.py
-from .text import seg_0021
+from t2c.ontology import Entity, EvidenceRef
+from .text import seg_0102, seg_0107, ...
 
-ent_zh_64e599 = Entity(id='hlm_ent_0006', name='甄士隐', kind='person',
-    evidence_refs=[EvidenceRef(segment_id='hlm_seg_0021', start=0, end=3,
-                               quote_hash='sha256:ae447e...')],
-)  # 甄士隐 (person)
+ent_zh_9d88d8 = Entity(
+    id='红楼梦1_3_ent_0001',
+    symbol='ent_zh_9d88d8',        # self-declared symbol
+    name='女娲氏',
+    kind='person',
+    ...
+)  # 女娲氏 (person)
 
 # claims.py
-from .entities import ent_zh_64e599, ent_zh_1fba96
+from t2c.ontology import Claim, EvidenceRef
+from .entities import ent_zh_692c5f, ent_zh_ed17f5, ...   # real live imports
+from .text import seg_0099, ...
 
-claim_ent0006_at_ent0002 = Claim(id='hlm_clm_0001',
-    subject='hlm_ent_0006', predicate='lives_in', object='hlm_ent_0002',
-    modality='asserted', polarity='positive',
-)  # hlm_ent_0006 lives_in hlm_ent_0002
+claim_zh_37b1d1 = Claim(
+    id='红楼梦1_3_clm_0005',
+    symbol='claim_zh_37b1d1',
+    subject='红楼梦1_3_ent_0007',          # data face: string ID
+    subject_symbol=ent_zh_ed17f5,          # navigation face: real AST reference
+    predicate='is_child_of',
+    object='红楼梦1_3_ent_0005',
+    object_symbol=ent_zh_692c5f,
+    modality='reported',
+    polarity='positive',
+    evidence_refs=[EvidenceRef(
+        segment_id='红楼梦1_3_seg_0099',
+        segment_symbol=seg_0099,
+        start=11, end=14,
+        quote_hash='sha256:...',
+    )],
+)
 ```
 
 Key properties:
-- **Stable symbols** (`ent_zh_64e599 = Entity(...)`) — CodeGraph indexes object boundaries through Python AST
-- **Pydantic-safe references** (`subject='hlm_ent_0006'`) — generated packages can be imported and validated as normal Python
-- **Cross-file imports** (`from .entities import ent_zh_64e599`) — code tools can discover package-level relationships
-- **Inline comments** (`# 甄士隐 (person)`) — FTS5 full-text search finds Chinese names
-- **Evidence traceability** — Every claim links back to exact source text offsets
+- **Data/navigation separation** — FK fields stay string IDs (Pydantic-safe); `*_symbol` fields are real AST references (find-references / go-to-definition work)
+- **Import-as-validation** — a dangling reference is an ImportError; a broken package simply cannot be loaded
+- **Package-level surface** — `__init__.py` re-exports every symbol with `__all__`; `from <book> import ent_zh_xxxx` just works
+- **Inline comments** (`# 女娲氏 (person)`) — FTS5 full-text search finds Chinese names
+- **Evidence traceability** — every claim links back to exact source offsets; quote hashes replay programmatically
+- **Reproducible builds** — same input + cache → byte-identical output (rebuild gate)
 
 <p align="right">(<a href="#readme-top">back to top</a>)</p>
 
@@ -239,7 +259,8 @@ Text2Code/
 │   ├── compile_target.py       # Multi-file compilation
 │   ├── validator.py            # 12-gate validation
 │   ├── compact_candidate.py    # Compact protocol parser & expander
-│   ├── ontology.py             # Pydantic type system (11 models)
+│   ├── ontology.py             # Pydantic type system (symbol self-declaration + unwrap validators)
+│   ├── symbols.py              # v6.0: single-point symbol assignment (package-unique, deterministic)
 │   ├── schema.py               # Schema validation layer
 │   ├── claim_safety.py         # 6 epistemic safety rules
 │   ├── llm_config.py           # Multi-provider LLM configuration
@@ -253,9 +274,8 @@ Text2Code/
 │   ├── graph_api.py            # Legacy/experimental graph query helper
 │   └── object_store.py         # Internal staging store
 ├── tests/                      # Test suite
-├── scripts/                    # Extraction scripts & tools
-├── spec/                       # Design documents
-│   ├── t2c_design_v4.0.md      # Current version design
+├── scripts/                    # Extraction scripts & tools (verify_codegraph.py = v6.0 acceptance gate)
+├── spec/                       # Design documents (t2c_design_v6.0.md = current; archive/ = history)
 ├── .env.example                # Environment variable template
 └── pyproject.toml
 ```
