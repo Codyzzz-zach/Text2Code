@@ -1,6 +1,6 @@
 [project]
 name = "text2code"
-version = "0.4.0"
+version = "0.6.0"
 description = "Text2Code — transform natural language into executable Knowledge Code"
 readme = "README.md"
 license = "MIT"

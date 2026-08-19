@@ -292,31 +292,30 @@ class TestTextCodeLayer:
         text_parser = T2CParser()
         text_objs = text_parser.parse_string(text_code)
         ext_index = {}
-        seg_id_to_sym = {}
         for o in text_objs:
             sym = o.get("symbol")
             if sym and o["type"] == "Segment":
                 ext_index[sym] = {"type": "Segment", "id": o["data"]["id"]}
-                seg_id_to_sym[o["data"]["id"]] = sym
 
         # Step 3: Create semantic objects referencing segments
         seg0_id = all_segs[0].id
-        seg0_sym = seg_id_to_sym.get(seg0_id, "seg_0000")
         eref = EvidenceRef(
-            segment_id=seg0_id, segment_symbol=seg0_sym,
+            segment_id=seg0_id,
             start=0, end=3, quote_hash=_sha256(all_segs[0].text_slice[:3]),
         )
         ent = Entity(id="ent1", name="甄士隐", kind="person", evidence_refs=[eref])
         ent2 = Entity(id="ent2", name="姑苏", kind="location")
 
-        sem_files = gen.generate_semantic_code_v33(
-            [ent, ent2],
-            external_symbols=seg_id_to_sym,
-            external_file=".text",
+        # v6.0: one symbol table drives text + semantic files
+        from t2c.symbols import compute_symbol_table
+        table = compute_symbol_table(
+            doc=doc, blocks=blocks, segments=all_segs, entities=[ent, ent2],
+        )
+        entities_code = gen._generate_type_file_v33(
+            ".entities", [ent, ent2], ["Entity", "EvidenceRef"], table,
         )
 
         # Step 4: Parse entities.py with external symbol index
-        entities_code = sem_files.get("entities.py", "")
         assert entities_code, "entities.py not generated"
         ent_parser = T2CParser(external_symbols=ext_index)
         ent_objs = ent_parser.parse_string(entities_code)

@@ -1,23 +1,25 @@
-"""Phase 3: AI Compact Candidate — parse → expand → symbol assign → codegen v33.
+"""Phase 3: AI Compact Candidate — parse → expand → codegen (v6.0).
 
-Proves the full pipeline from LLM compact JSON to v3.3 codegraph-native code.
+Proves the full pipeline from LLM compact JSON to codegraph-native code.
+v6.0: symbol assignment moved to the single compile-time choke point
+(t2c.symbols.compute_symbol_table); expansion no longer assigns symbols.
 """
 import hashlib
 
 from t2c.codegen import CodeGenerator
 from t2c.compact_candidate import (
-    assign_symbols,
     derive_relations,
-    expand_and_assign_symbols,
     expand_candidates,
     expansion_failures_to_residuals,
     parse_compact_response,
 )
 from t2c.corpus import CorpusManager
 from t2c.coverage import CoverageGenerator
-from t2c.ontology import Segment
+from t2c.ontology import Claim, Entity, Segment
 from t2c.parser import T2CParser
+from t2c.schema import SchemaValidator
 from t2c.segmenter import Segmenter
+from t2c.symbols import compute_symbol_table
 from t2c.validator import Validator
 
 
@@ -54,14 +56,10 @@ class TestCompactToCodegenV33:
             _StubSegment("s_title", "第一回 甄士隐梦幻识通灵"),
         ]
 
-        # Step 3: Expand + assign v3.3 symbols
-        objects, symbol_map, warnings = expand_and_assign_symbols(
+        # Step 3: Expand (no symbols at this layer since v6.0)
+        objects, warnings = expand_candidates(
             candidates, segs, doc_id="hlm",
         )
-
-        # Verify symbols were assigned
-        for obj in objects:
-            assert "symbol" in obj, f"Object missing symbol: {obj['type']}"
 
         # Step 4: Derive relations from Claims
         entity_ids = {
@@ -69,26 +67,19 @@ class TestCompactToCodegenV33:
         }
         relations, rel_warnings = derive_relations(objects, entity_ids, doc_id="hlm")
         assert len(relations) >= 1, f"No relations derived: {rel_warnings}"
-        # Assign symbols to relations too
-        rel_symbols = assign_symbols(relations, existing_symbols=set(symbol_map.values()))
-        symbol_map.update(rel_symbols)
+        objects.extend(relations)
 
-        # Step 5: Build segment symbol map (simulate text.py parse)
-        seg_id_map = {"s1": "seg_0000", "s_title": "seg_0001"}
+        # Step 5: Construct models + assign symbols at the compile choke point
+        models, violations = SchemaValidator().validate_and_construct(objects)
+        assert not violations, f"schema violations: {violations}"
+        entities = [m for m in models if isinstance(m, Entity)]
+        claims = [m for m in models if isinstance(m, Claim)]
+        table = compute_symbol_table(entities=entities, claims=claims)
+        # Every object got a package-unique symbol
+        assert len(table) == len(entities) + len(claims)
+        assert len(set(table.id_to_symbol.values())) == len(table)
 
-        # Step 6: Generate v3.3 code from expanded objects
-        gen = CodeGenerator(version="v3.3-flash")
-
-        # Filter by type for codegen
-        entities = [o for o in objects if o["type"] == "Entity"]
-        claims = [o for o in objects if o["type"] == "Claim"]
-        ignores = [o for o in objects if o["type"] == "IgnoreSegment"]
-
-        # Convert to Pydantic-compatible flat dicts
-        # ... codegen.generate_semantic_code_v33 expects Pydantic models, not dicts
-        # For the test, we verify the expanded objects are structurally valid
-
-        # Step 7: Verify evidence_refs were located
+        # Step 6: Verify evidence_refs were located
         for obj in objects:
             if obj["type"] in ("Entity", "Claim"):
                 erefs = obj["data"].get("evidence_refs", [])
@@ -96,63 +87,36 @@ class TestCompactToCodegenV33:
                 if obj["type"] == "Entity" and obj["data"].get("name") == "甄士隐":
                     assert len(erefs) >= 1, f"No evidence refs for 甄士隐"
 
-        # Step 8: Validate with validator
-        # Build equivalent flat objects
-        parsed_objs = []
-        seg_symbols = {}
-        for sid, sym in seg_id_map.items():
-            seg = next((s for s in segs if s.id == sid), None)
-            seg_data = {
-                "id": sid, "doc_id": "hlm", "block_index": 0,
-                "segment_type": "sentence",
-                "start_offset": 0, "end_offset": len(seg.text_slice) if seg else 0,
-                "text_slice": seg.text_slice if seg else "",
-                "hash": _sha256(seg.text_slice if seg else ""),
+        # Step 7: Validate with validator
+        parsed_objs = [{"type": o["type"], "data": o["data"]} for o in objects]
+        seg_data_objs = [
+            {
+                "type": "Segment",
+                "data": {
+                    "id": s.id, "doc_id": "hlm", "block_index": 0,
+                    "segment_type": "sentence",
+                    "start_offset": 0, "end_offset": len(s.text_slice),
+                    "text_slice": s.text_slice,
+                    "hash": _sha256(s.text_slice),
+                },
             }
-            parsed_objs.append({"type": "Segment", "symbol": sym, "data": seg_data})
-            seg_symbols[sym] = {"type": "Segment", "id": sid}
-
-        # Merge expanded objects
-        sym_ext_index = {}
-        for obj in objects:
-            obj_id = obj["data"]["id"]
-            sym = obj["symbol"]
-            sym_ext_index[sym] = {"type": obj["type"], "id": obj_id}
-            # Convert evidence_refs from plain dicts to parsed format
-            data = dict(obj["data"])
-            erefs_v33 = []
-            for eref in data.get("evidence_refs", []):
-                erefs_v33.append({
-                    "type": "EvidenceRef",
-                    "data": {
-                        "segment_id": eref.get("segment_id"),
-                        "start": eref.get("start", 0),
-                        "end": eref.get("end", 0),
-                        "quote_hash": eref.get("quote_hash", ""),
-                    },
-                })
-            data["evidence_refs"] = erefs_v33
-            parsed_objs.append({
-                "type": obj["type"],
-                "symbol": sym,
-                "data": data,
-                "__symbol_refs__": obj.get("__symbol_refs__", {}),
-            })
-
+            for s in segs
+        ]
         v = Validator()
-        result = v.validate_objects(parsed_objs)
+        result = v.validate_objects(seg_data_objs + parsed_objs)
         # May have warnings about cross-file refs, but should not have hard errors
         assert isinstance(result.valid, bool)
 
-    def test_assign_symbols_stable(self):
-        """Assign symbols produces stable results for same input."""
-        from t2c.compact_candidate import assign_symbols
+    def test_symbol_table_stable(self):
+        """compute_symbol_table produces stable results for the same object set."""
+        def make():
+            return [Entity(id="e1", name="甄士隐", kind="person")]
 
-        objs1 = [{"type": "Entity", "data": {"id": "e1", "name": "甄士隐", "kind": "person"}}]
-        objs2 = [{"type": "Entity", "data": {"id": "e1", "name": "甄士隐", "kind": "person"}}]
-        m1 = assign_symbols(objs1)
-        m2 = assign_symbols(objs2)
-        assert m1 == m2, f"Symbols not stable: {m1} vs {m2}"
+        t1 = compute_symbol_table(entities=make())
+        t2 = compute_symbol_table(entities=make())
+        assert t1.id_to_symbol == t2.id_to_symbol, (
+            f"Symbols not stable: {t1.id_to_symbol} vs {t2.id_to_symbol}"
+        )
 
     def test_expansion_failures_to_residuals(self):
         """Warnings about missing evidence → Residual objects."""
@@ -165,15 +129,19 @@ class TestCompactToCodegenV33:
         assert residuals[0]["type"] == "Residual"
         assert "贾宝玉" in residuals[0]["data"]["reason"]
 
-    def test_compute_symbol_name_chinese(self):
+    def test_symbol_name_chinese(self):
         """Chinese names produce hash-based symbols."""
-        from t2c.compact_candidate import compute_symbol_name
-        sym = compute_symbol_name("Entity", "甄士隐", "e1")
+        table = compute_symbol_table(
+            entities=[Entity(id="e1", name="甄士隐", kind="person")]
+        )
+        sym = table.symbol_for("e1")
         assert sym.startswith("ent_zh_"), f"Expected ent_zh_HASH, got {sym}"
         assert len(sym) <= 16
 
-    def test_compute_symbol_name_ascii_short(self):
+    def test_symbol_name_ascii_short(self):
         """Short ASCII names kept as-is."""
-        from t2c.compact_candidate import compute_symbol_name
-        sym = compute_symbol_name("Entity", "Alice", "e1")
+        table = compute_symbol_table(
+            entities=[Entity(id="e1", name="Alice", kind="person")]
+        )
+        sym = table.symbol_for("e1")
         assert sym == "ent_alice", f"Expected ent_alice, got {sym}"

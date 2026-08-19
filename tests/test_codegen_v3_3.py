@@ -54,12 +54,12 @@ class TestV33CodeGeneration:
     def test_segment_symbol_naming(self):
         gen = CodeGenerator(version="v3.3-flash")
         seg1 = Segment(
-            id="seg1", doc_id="doc1", block_index=0,
+            id="doc1_seg_0001", doc_id="doc1", block_index=0,
             segment_type="sentence", start_offset=0, end_offset=5,
             text_slice="hello", hash=_sha256("hello"),
         )
         seg2 = Segment(
-            id="seg2", doc_id="doc1", block_index=0,  # same block_index!
+            id="doc1_seg_0002", doc_id="doc1", block_index=0,  # same block_index!
             segment_type="sentence", start_offset=5, end_offset=10,
             text_slice="world", hash=_sha256("world"),
         )
@@ -70,28 +70,23 @@ class TestV33CodeGeneration:
         )
         files = gen.generate_text_code_v33(doc, [], [seg1, seg2])
         code = files["text.py"]
-        # Sequential naming: segments after Document get seg_0001, seg_0002
-        # (not block_index-based or suffix-based)
         assert " = Segment(" in code  # assignment format
-        assert "seg_0000_1" not in code  # No suffix-based naming
-        # Both segments should have consecutive symbols
-        import re
-        seg_syms = re.findall(r"(seg_\d+) = Segment\(", code)
-        assert len(seg_syms) == 2, f"Expected 2 segment symbols, got {seg_syms}"
-        # Symbols should be sequential
-        nums = [int(s.split('_')[1]) for s in seg_syms]
-        assert nums == sorted(nums), f"Segment symbols not sequential: {seg_syms}"
+        # v6.0: segment symbols derive from the id suffix
+        assert "seg_0001 = Segment(" in code
+        assert "seg_0002 = Segment(" in code
+        # and self-declare via the symbol field
+        assert "symbol='seg_0001'" in code
 
     def test_entity_with_evidence_symbol_ref(self):
-        # v3.3 mode: emit symbol refs in EvidenceRef. Opt-in via flag.
-        gen = CodeGenerator(version="v3.3-flash", emit_symbol_refs=True)
+        # v6.0: bare-Name refs are the only mode; symbols come from the table.
+        gen = CodeGenerator(version="v3.3-flash")
         seg = Segment(
-            id="seg1", doc_id="doc1", block_index=0,
+            id="doc1_seg_0001", doc_id="doc1", block_index=0,
             segment_type="sentence", start_offset=0, end_offset=9,
             text_slice="甄士隐住在姑苏", hash=_sha256("甄士隐住在姑苏"),
         )
         eref = EvidenceRef(
-            segment_id="seg1", segment_symbol="seg_0000",
+            segment_id="doc1_seg_0001",
             start=0, end=3, quote_hash=_sha256("甄士隐"),
         )
         ent = Entity(
@@ -99,17 +94,16 @@ class TestV33CodeGeneration:
             evidence_refs=[eref],
         )
 
-        # External symbols: seg1 → seg_0000
-        ext_syms = {"seg1": "seg_0000"}
-        files = gen.generate_semantic_code_v33([ent], external_symbols=ext_syms, external_file=".text")
-        assert "entities.py" in files
-        code = files["entities.py"]
+        from t2c.symbols import compute_symbol_table
+        table = compute_symbol_table(segments=[seg], entities=[ent])
+        code = gen._generate_type_file_v33(
+            ".entities", [ent], ["Entity", "EvidenceRef"], table,
+        )
         # Must be valid Python
         compile(code, "<entities.py>", "exec")
-        # v3.3 mode: keyword is v3.3 alias 'segment' and value is symbol ref
-        assert "segment=seg_0000" in code
-        # Must import from .text
-        assert "from .text import seg_0000" in code
+        # v6.0: segment_symbol is a bare Name backed by a live import
+        assert "segment_symbol=seg_0001" in code
+        assert "from .text import seg_0001" in code
         # Must have assignment
         assert "ent_zh_" in code
         assert " = Entity(" in code
@@ -117,12 +111,12 @@ class TestV33CodeGeneration:
     def test_claim_subject_object_symbol_ref(self):
         gen = CodeGenerator(version="v3.3-flash")
         seg = Segment(
-            id="seg1", doc_id="doc1", block_index=0,
+            id="doc1_seg_0001", doc_id="doc1", block_index=0,
             segment_type="sentence", start_offset=0, end_offset=9,
             text_slice="甄士隐住在姑苏", hash=_sha256("甄士隐住在姑苏"),
         )
         eref = EvidenceRef(
-            segment_id="seg1", segment_symbol="seg_0000",
+            segment_id="doc1_seg_0001",
             start=0, end=3, quote_hash=_sha256("甄士隐"),
         )
         ent1 = Entity(id="ent1", name="甄士隐", kind="person")
@@ -132,21 +126,21 @@ class TestV33CodeGeneration:
             modality="asserted", polarity="positive",
             evidence_refs=[eref],
         )
-        # External seg symbols
-        ext_syms = {"seg1": "seg_0000"}
-        # Entity symbols (will be computed)
-        files = gen.generate_semantic_code_v33(
-            [ent1, ent2, claim],
-            external_symbols=ext_syms,
-            external_file=".text",
+        from t2c.symbols import compute_symbol_table
+        table = compute_symbol_table(
+            segments=[seg], entities=[ent1, ent2], claims=[claim],
         )
-        assert "claims.py" in files
-        code = files["claims.py"]
+        code = gen._generate_type_file_v33(
+            ".claims", [claim], ["Claim", "EvidenceRef"], table,
+        )
         compile(code, "<claims.py>", "exec")
-        # Subject and object should be entity symbol refs (not strings)
-        # The entity symbols should appear in Claim arguments
-        assert "subject=" in code
-        assert "object=" in code
+        ent1_sym = table.symbol_for("ent1")
+        ent2_sym = table.symbol_for("ent2")
+        # Subject/object keep string ids (data face) and gain bare Names
+        assert "subject='ent1'" in code
+        assert f"subject_symbol={ent1_sym}" in code
+        assert f"object_symbol={ent2_sym}" in code
+        assert f"from .entities import" in code
 
     def test_generated_code_roundtrip(self):
         """Generated v3.3 code must be parseable by the parser."""
@@ -190,7 +184,7 @@ class TestV33CodeGeneration:
 
     def test_claim_long_id_uses_hash(self):
         """Claims with long ASCII subject/object IDs should use hash names."""
-        gen = CodeGenerator(version="v3.3-flash")
+        from t2c.symbols import compute_symbol_table
         claim = Claim(
             id="clm1",
             subject="hongloumeng_ent_0001",
@@ -199,42 +193,61 @@ class TestV33CodeGeneration:
             modality="asserted",
             polarity="positive",
         )
-        symbols = gen._compute_symbol_names([claim])
-        sym = symbols["clm1"]
+        table = compute_symbol_table(claims=[claim])
+        sym = table.symbol_for("clm1")
         # Should be claim_zh_<hash>, not the full concatenated ID string
         assert sym.startswith("claim_zh_"), f"Expected hash-based name, got {sym}"
         assert len(sym) <= 18, f"Symbol too long: {sym}"
 
     def test_chinese_entity_hash_symbol(self):
         """Chinese entity names produce stable hash-based symbols."""
-        gen = CodeGenerator(version="v3.3-flash")
+        from t2c.symbols import compute_symbol_table
         ent = Entity(id="ent1", name="甄士隐", kind="person")
-        symbols = gen._compute_symbol_names([ent])
-        sym = symbols["ent1"]
+        table = compute_symbol_table(entities=[ent])
+        sym = table.symbol_for("ent1")
         # Should be ent_zh_<hash>
         assert sym.startswith("ent_zh_")
         assert len(sym) == len("ent_zh_") + 6  # 6 hex chars
 
     def test_derived_code_generation(self):
         gen = CodeGenerator(version="v3.3-flash")
+        from t2c.symbols import compute_symbol_table
+        ent1 = Entity(id="ent1", name="甄士隐", kind="person")
+        ent2 = Entity(id="ent2", name="姑苏", kind="location")
+        claim = Claim(
+            id="clm1", subject="ent1", predicate="lives_in", object="ent2",
+            modality="asserted", polarity="positive",
+        )
         rel = Relation(
             id="rel1", subject="ent1", predicate="lives_in",
             object="ent2", claim_id="clm1",
         )
-        ign = IgnoreSegment(id="ign1", segment_id="seg1", reason="page number")
-
-        ext_syms = {"seg1": "seg_0000", "ent1": "ent_zh_abc123", "ent2": "ent_zh_def456", "clm1": "claim_zh_789abc"}
-        files = gen.generate_semantic_code_v33(
-            [rel, ign],
-            external_symbols=ext_syms,
-            external_file=".text",
+        seg = Segment(
+            id="doc1_seg_0001", doc_id="doc1", block_index=0,
+            segment_type="sentence", start_offset=0, end_offset=5,
+            text_slice="hello", hash=_sha256("hello"),
         )
-        assert "derived.py" in files
-        code = files["derived.py"]
-        compile(code, "<derived.py>", "exec")
-        # Should contain Relation and IgnoreSegment
-        assert "Relation(" in code
-        assert "IgnoreSegment(" in code
+        ign = IgnoreSegment(id="ign1", segment_id="doc1_seg_0001", reason="page number")
+
+        table = compute_symbol_table(
+            segments=[seg], entities=[ent1, ent2],
+            claims=[claim], relations=[rel], ignores=[ign],
+        )
+        derived_code = gen._generate_type_file_v33(
+            ".derived", [rel], ["Relation", "EvidenceRef"], table,
+        )
+        compile(derived_code, "<derived.py>", "exec")
+        assert "Relation(" in derived_code
+        # Relation carries bare-Name refs to entities + claim
+        assert f"claim_symbol={table.symbol_for('clm1')}" in derived_code
+
+        res_code = gen._generate_type_file_v33(
+            ".residuals", [ign], ["Residual", "IgnoreSegment", "EvidenceRef"], table,
+        )
+        compile(res_code, "<residuals.py>", "exec")
+        assert "IgnoreSegment(" in res_code
+        assert "segment_symbol=seg_0001" in res_code
+        assert "from .text import seg_0001" in res_code
 
 
 class TestV33BackwardCompat:

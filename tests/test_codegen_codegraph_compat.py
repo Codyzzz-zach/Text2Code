@@ -1,17 +1,20 @@
-"""Tests for CodeGraph adaptation — v4.1 .t2c.py output.
+"""Tests for CodeGraph adaptation — v6.0 .t2c.py output.
 
 Proves:
-- emit_symbol_refs defaults to False (string literals, Pydantic-safe)
-- Cross-file imports are complete for all file types (events, derived, claims)
+- Single output mode: FK fields stay string literals (data face);
+  *_symbol fields are bare Names backed by live imports (navigation face)
+- Cross-file imports are live (every import used) for all file types
+- Dangling FK references fail at codegen (CodegraphSymbolError)
 - CoverageReport uses assignment format (not orphaned call)
 - Inline comments provide FTS5-searchable Chinese names
 - SYMBOL_REF_TO_FIELD populates _symbol fields from __symbol_refs__ metadata
-- Symbol refs mode (emit_symbol_refs=True) is available but breaks Pydantic
 """
 from __future__ import annotations
 
 import ast
 import hashlib
+
+import pytest
 
 from t2c.codegen import CodeGenerator
 from t2c.ontology import (
@@ -29,6 +32,7 @@ from t2c.ontology import (
 )
 from t2c.parser import T2CParser
 from t2c.schema import SchemaValidator
+from t2c.symbols import CodegenSymbolError
 
 
 def _sha(text: str) -> str:
@@ -56,48 +60,26 @@ def _make_doc_seg():
 
 
 # ---------------------------------------------------------------------------
-# Step 2: emit_symbol_refs default
+# v6.0 single mode: string FK + bare-Name _symbol
 # ---------------------------------------------------------------------------
 
 
-class TestEmitSymbolRefsDefault:
-    """emit_symbol_refs defaults to False (Pydantic-safe string literals)."""
+class TestV6SingleMode:
+    """v6.0 has exactly one output mode: string FK + bare-Name symbol refs."""
 
-    def test_default_emit_symbol_refs_is_false(self):
+    def test_no_emit_symbol_refs_flag(self):
+        """The dual-mode flag is gone."""
         gen = CodeGenerator()
-        assert gen._emit_symbol_refs is False
+        assert not hasattr(gen, "_emit_symbol_refs")
 
-    def test_explicit_false_produces_string_literals(self):
-        """When emit_symbol_refs=False, reference fields use string literals."""
-        gen = CodeGenerator(emit_symbol_refs=False)
-        _, _, seg = _make_doc_seg()
-        ent1 = Entity(id="ent1", name="甄士隐", kind="person")
-        ent2 = Entity(id="ent2", name="姑苏", kind="location")
-        claim = Claim(
-            id="clm1", subject="ent1", predicate="lives_in", object="ent2",
-            modality="asserted", polarity="positive",
-        )
-        ext_syms = {"seg1": "seg_0001"}
-        files = gen.generate_semantic_code_v33(
-            [ent1, ent2, claim],
-            external_symbols=ext_syms, external_file=".text",
-        )
-        code = files["claims.py"]
-        # String literal mode: subject='ent1', not subject=ent_zh_...
-        assert "subject='ent1'" in code
-        assert "object='ent2'" in code
-
-    def test_string_literals_in_multi_file_output(self):
-        """Multi-file compilation emits string literals by default (Pydantic-safe)."""
+    def test_fk_string_plus_bare_name_symbols(self):
+        """claims.py keeps string FK ids and emits bare-Name _symbol fields."""
         doc, blk, seg = _make_doc_seg()
         ent1 = Entity(id="ent1", name="甄士隐", kind="person")
         ent2 = Entity(id="ent2", name="姑苏", kind="location")
         claim = Claim(
             id="clm1", subject="ent1", predicate="lives_in", object="ent2",
             modality="asserted", polarity="positive",
-            evidence_refs=[EvidenceRef(
-                segment_id="seg1", start=0, end=3, quote_hash=_sha("甄士隐"),
-            )],
         )
         rel = Relation(
             id="rel1", subject="ent1", predicate="lives_in",
@@ -110,40 +92,42 @@ class TestEmitSymbolRefsDefault:
             entities=[ent1, ent2], claims=[claim], relations=[rel],
         )
 
-        # claims.py should use string literals for subject/object
         claims_code = files["claims.py"]
-        assert "subject='ent1'" in claims_code, f"Expected string literal in claims.py, got: {claims_code}"
+        # Data face: FK fields remain string literals
+        assert "subject='ent1'" in claims_code
         assert "object='ent2'" in claims_code
+        # Navigation face: bare-Name symbol refs + live import
+        assert "subject_symbol=ent_zh_" in claims_code
+        assert "object_symbol=ent_zh_" in claims_code
+        assert "from .entities import" in claims_code
+        # Whole file is valid Python
+        ast.parse(claims_code)
 
-        # derived.py should use string literals for subject/object/claim
         derived_code = files["derived.py"]
         assert "subject='ent1'" in derived_code
-        assert "object='ent2'" in derived_code
         assert "claim_id='clm1'" in derived_code
+        assert "claim_symbol=claim_ent1_lives_in_ent2" in derived_code
+        assert "from .entities import" in derived_code
+        assert "from .claims import" in derived_code
 
-    def test_symbol_refs_available_when_explicitly_enabled(self):
-        """emit_symbol_refs=True produces symbol refs (but breaks Pydantic)."""
+    def test_symbol_self_declaration(self):
+        """Every object self-declares its symbol via the symbol field."""
         doc, blk, seg = _make_doc_seg()
-        ent1 = Entity(id="ent1", name="甄士隐", kind="person")
-        ent2 = Entity(id="ent2", name="姑苏", kind="location")
-        claim = Claim(
-            id="clm1", subject="ent1", predicate="lives_in", object="ent2",
-            modality="asserted", polarity="positive",
-        )
+        ent = Entity(id="ent1", name="甄士隐", kind="person")
 
-        gen = CodeGenerator(emit_symbol_refs=True)
+        gen = CodeGenerator()
         files = gen.generate_multi_file_compilation(
             doc=doc, blocks=[blk], segments=[seg],
-            entities=[ent1, ent2], claims=[claim],
+            entities=[ent],
         )
-
-        # Symbol ref mode: subject=ent_zh_..., not subject='ent1'
-        claims_code = files["claims.py"]
-        assert "subject=ent_" in claims_code, f"Expected symbol ref in claims.py, got: {claims_code}"
+        entities_code = files["entities.py"]
+        assert "symbol='ent_zh_" in entities_code
+        text_code = files["text.py"]
+        assert "symbol='seg_" in text_code
 
 
 # ---------------------------------------------------------------------------
-# Step 1: Cross-file imports for events.py and derived.py
+# Cross-file imports (v6.0: always live; dangling FK is a compile error)
 # ---------------------------------------------------------------------------
 
 
@@ -151,7 +135,7 @@ class TestCrossFileImports:
     """All semantic files must import the symbols they reference."""
 
     def test_events_py_imports_entity_symbols(self):
-        """events.py imports entity symbols only when emit_symbol_refs=True."""
+        """events.py imports entity symbols used in participant_symbols."""
         doc, blk, seg = _make_doc_seg()
         ent = Entity(id="ent1", name="甄士隐", kind="person")
         evt = Event(
@@ -162,33 +146,22 @@ class TestCrossFileImports:
             )],
         )
 
-        # Default mode (emit_symbol_refs=False): no dead imports
         gen = CodeGenerator()
         files = gen.generate_multi_file_compilation(
             doc=doc, blocks=[blk], segments=[seg],
             entities=[ent], events=[evt],
         )
         events_code = files["events.py"]
-        # P4-2: no imports when emit_symbol_refs=False (dead imports removed)
-        assert "from .entities import" not in events_code, (
-            f"events.py should NOT import from .entities when emit_symbol_refs=False\n{events_code}"
-        )
-        # participants use string literals (Pydantic-safe)
+        # participants FK stays a string list
         assert "participants=['ent1']" in events_code
-
-        # Symbol ref mode: imports present
-        gen_sym = CodeGenerator(emit_symbol_refs=True)
-        files_sym = gen_sym.generate_multi_file_compilation(
-            doc=doc, blocks=[blk], segments=[seg],
-            entities=[ent], events=[evt],
-        )
-        events_sym_code = files_sym["events.py"]
-        assert "from .entities import" in events_sym_code, (
-            f"events.py should import from .entities when emit_symbol_refs=True\n{events_sym_code}"
-        )
+        # navigation face: bare-Name list + live imports from both .entities and .text
+        assert "participant_symbols=[ent_zh_" in events_code
+        assert "from .entities import" in events_code
+        assert "from .text import" in events_code
+        ast.parse(events_code)
 
     def test_derived_py_imports_entity_and_claim_symbols(self):
-        """derived.py imports only when emit_symbol_refs=True."""
+        """derived.py imports the entity and claim symbols it references."""
         doc, blk, seg = _make_doc_seg()
         ent1 = Entity(id="ent1", name="甄士隐", kind="person")
         ent2 = Entity(id="ent2", name="姑苏", kind="location")
@@ -201,34 +174,18 @@ class TestCrossFileImports:
             object="ent2", claim_id="clm1",
         )
 
-        # Default mode (emit_symbol_refs=False): no dead imports
         gen = CodeGenerator()
         files = gen.generate_multi_file_compilation(
             doc=doc, blocks=[blk], segments=[seg],
             entities=[ent1, ent2], claims=[claim], relations=[rel],
         )
-
         derived_code = files["derived.py"]
-        # P4-2: no imports when emit_symbol_refs=False
-        assert "from .entities import" not in derived_code, (
-            f"derived.py should NOT import from .entities when emit_symbol_refs=False\n{derived_code}"
-        )
-        assert "from .claims import" not in derived_code, (
-            f"derived.py should NOT import from .claims when emit_symbol_refs=False\n{derived_code}"
-        )
+        assert "from .entities import" in derived_code
+        assert "from .claims import" in derived_code
+        ast.parse(derived_code)
 
-        # Symbol ref mode: imports present
-        gen_sym = CodeGenerator(emit_symbol_refs=True)
-        files_sym = gen_sym.generate_multi_file_compilation(
-            doc=doc, blocks=[blk], segments=[seg],
-            entities=[ent1, ent2], claims=[claim], relations=[rel],
-        )
-        derived_sym = files_sym["derived.py"]
-        assert "from .entities import" in derived_sym
-        assert "from .claims import" in derived_sym
-
-    def test_events_py_no_entity_imports_when_no_entities(self):
-        """events.py should not import from .entities when no entities exist."""
+    def test_dangling_participant_is_compile_error(self):
+        """v6.0: referencing a non-existent entity fails at codegen."""
         doc, blk, seg = _make_doc_seg()
         evt = Event(
             id="evt1", name="甄士隐梦游太虚", kind="dream",
@@ -236,14 +193,30 @@ class TestCrossFileImports:
         )
 
         gen = CodeGenerator()
+        with pytest.raises(CodegenSymbolError):
+            gen.generate_multi_file_compilation(
+                doc=doc, blocks=[blk], segments=[seg],
+                events=[evt],
+            )
+
+    def test_literal_object_no_symbol_channel(self):
+        """A literal (non-id) Claim.object produces no object_symbol — no error."""
+        doc, blk, seg = _make_doc_seg()
+        ent1 = Entity(id="ent1", name="甄士隐", kind="person")
+        claim = Claim(
+            id="clm1", subject="ent1", predicate="desires",
+            object="功名",  # literal object, not an entity id
+            modality="asserted", polarity="positive",
+        )
+        gen = CodeGenerator()
         files = gen.generate_multi_file_compilation(
             doc=doc, blocks=[blk], segments=[seg],
-            events=[evt],
+            entities=[ent1], claims=[claim],
         )
-
-        events_code = files["events.py"]
-        # No .entities import when no entity symbols available
-        assert "from .entities import" not in events_code
+        claims_code = files["claims.py"]
+        assert "object='功名'" in claims_code
+        assert "object_symbol" not in claims_code
+        ast.parse(claims_code)
 
 
 # ---------------------------------------------------------------------------

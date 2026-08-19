@@ -719,108 +719,14 @@ def derive_relations(
 
 
 # ---------------------------------------------------------------------------
-# v3.3 symbol assignment during expansion
+# v3.3 symbol assignment — REMOVED in v6.0 (M1).
+#
+# Symbols are now assigned exactly once, at the compile choke point, by
+# t2c.symbols.compute_symbol_table. This module's assign_symbols /
+# compute_symbol_name / expand_and_assign_symbols had silently diverged
+# from codegen's naming (Segment/Residual branches, Claim hash formula,
+# uniqueness scope) and are deleted rather than reconciled.
 # ---------------------------------------------------------------------------
-
-
-def compute_symbol_name(type_name: str, name_or_key: str, object_id: str) -> str:
-    """Compute a stable v3.3 Python symbol for an expanded candidate.
-
-    Uses hash-based naming for Chinese/non-ASCII names, short ASCII names
-    kept as-is (max 30 chars).
-    """
-    if type_name == "Entity":
-        prefix = "ent"
-    elif type_name == "Event":
-        prefix = "evt"
-    elif type_name == "Claim":
-        prefix = "claim"
-    else:
-        prefix = "obj"
-
-    key = name_or_key if name_or_key else object_id
-    # Try ASCII-safe normalization
-    if key.isascii() and key.replace("_", "").isalnum():
-        norm = key.lower().replace(" ", "_").replace("-", "_")
-        if len(norm) <= 30:
-            return f"{prefix}_{norm}"
-    # Fall back to hash
-    h = hashlib.sha256(f"{key}{object_id}".encode("utf-8")).hexdigest()[:6]
-    return f"{prefix}_zh_{h}"
-
-
-def assign_symbols(
-    objects: list[dict],
-    *,
-    existing_symbols: set[str] | None = None,
-) -> dict[str, str]:
-    """Assign v3.3 Python symbols to expanded candidate objects.
-
-    Modifies each object dict in-place, adding a "symbol" key.
-    Returns {object_id: symbol_name} for use as external_symbols index.
-    Symbol naming is stable: same name/id → same symbol.
-    """
-    used: set[str] = set(existing_symbols or ())
-    symbol_map: dict[str, str] = {}
-
-    for obj in objects:
-        type_name = obj.get("type", "")
-        data = obj.get("data", {})
-        obj_id = data.get("id", "")
-
-        if type_name == "Entity":
-            key = data.get("name", obj_id)
-        elif type_name == "Event":
-            key = data.get("name", obj_id)
-        elif type_name == "Claim":
-            subj = data.get("subject", "")
-            pred = data.get("predicate", "")
-            obj_val = data.get("object", "") or ""
-            key = f"{subj}_{pred}_{obj_val}"
-        else:
-            key = obj_id
-
-        base = compute_symbol_name(type_name, key, obj_id)
-        sym = base
-        suffix = 0
-        while sym in used:
-            suffix += 1
-            sym = f"{base}_{suffix}"
-
-        used.add(sym)
-        obj["symbol"] = sym
-        symbol_map[obj_id] = sym
-
-    return symbol_map
-
-
-def expand_and_assign_symbols(
-    candidates: list[CompactCandidate],
-    segments: list[Any],
-    doc_id: str,
-    *,
-    existing_symbols: set[str] | None = None,
-    next_ent_idx: int = 1,
-    next_evt_idx: int = 1,
-    next_clm_idx: int = 1,
-    next_ign_idx: int = 1,
-) -> tuple[list[dict], dict[str, str], list[str]]:
-    """Expand compact candidates AND assign v3.3 symbols in one pass.
-
-    Returns (objects, symbol_map, warnings):
-      - objects: list of {"type", "symbol", "data"} dicts ready for codegen
-      - symbol_map: {object_id: symbol_name}
-      - warnings: aggregate warnings
-    """
-    objects, warnings = expand_candidates(
-        candidates, segments, doc_id,
-        next_ent_idx=next_ent_idx,
-        next_evt_idx=next_evt_idx,
-        next_clm_idx=next_clm_idx,
-        next_ign_idx=next_ign_idx,
-    )
-    symbol_map = assign_symbols(objects, existing_symbols=existing_symbols)
-    return objects, symbol_map, warnings
 
 
 def expansion_failures_to_residuals(
@@ -865,11 +771,8 @@ __all__ = [
     "VALID_COMPACT_TYPES",
     "VALID_MODALITIES",
     "VALID_POLARITIES",
-    "assign_symbols",
     "build_evidence_refs",
-    "compute_symbol_name",
     "derive_relations",
-    "expand_and_assign_symbols",
     "expand_candidates",
     "expansion_failures_to_residuals",
     "locate_quote",

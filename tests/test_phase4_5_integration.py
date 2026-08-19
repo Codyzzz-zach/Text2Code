@@ -6,13 +6,16 @@ Proves:
 - Cross-file references are detectable
 - evidence_ref_rate is measurable
 - Silent loss is tracked
+
+v6.0: symbols come from the single compile-time table (t2c.symbols);
+cross-file references are bare Names backed by live imports.
 """
 import ast
 import hashlib
 
 from t2c.codegen import CodeGenerator
 from t2c.compact_candidate import (
-    expand_and_assign_symbols,
+    expand_candidates,
     expansion_failures_to_residuals,
     parse_compact_response,
 )
@@ -33,6 +36,7 @@ from t2c.symbol_analyzer import (
     analyze_multi_file,
     cross_file_reference_count,
 )
+from t2c.symbols import compute_symbol_table
 from t2c.validator import Validator
 
 
@@ -56,15 +60,15 @@ class TestCodeGraphIntegration:
                        total_length=100, block_count=1, created_at="2026-01-01T00:00:00Z")
         seg = Segment(id="s1", doc_id="d1", block_index=0, segment_type="sentence",
                       start_offset=0, end_offset=5, text_slice="hello", hash=_sha256("hello"))
-        eref = EvidenceRef(segment_id="s1", segment_symbol="seg_0001",
-                           start=0, end=3, quote_hash=_sha256("hel"))
+        eref = EvidenceRef(segment_id="s1", start=0, end=3, quote_hash=_sha256("hel"))
         ent = Entity(id="e1", name="Test", kind="person", evidence_refs=[eref])
 
+        table = compute_symbol_table(doc=doc, segments=[seg], entities=[ent])
         files = {}
-        files.update(gen.generate_text_code_v33(doc, [], [seg]))
-        files.update(gen.generate_semantic_code_v33(
-            [ent], external_symbols={"s1": "seg_0001"}, external_file=".text",
-        ))
+        files.update(gen.generate_text_code_v33(doc, [], [seg], symbols=table))
+        files["entities.py"] = gen._generate_type_file_v33(
+            ".entities", [ent], ["Entity", "EvidenceRef"], table,
+        )
 
         for fname, code in files.items():
             try:
@@ -84,7 +88,8 @@ class TestCodeGraphIntegration:
                        start_offset=3, end_offset=6, text_slice="DEF", hash=_sha256("DEF"))
 
         # text.py: Document + 2 segments → 3 definitions
-        text_files = gen.generate_text_code_v33(doc, [], [seg1, seg2])
+        table = compute_symbol_table(doc=doc, segments=[seg1, seg2])
+        text_files = gen.generate_text_code_v33(doc, [], [seg1, seg2], symbols=table)
         analysis = analyze_file(text_files["text.py"], "text.py")
         assert analysis.total_definitions >= 3, (
             f"Expected >=3 definitions, got {analysis.total_definitions}"
@@ -93,24 +98,16 @@ class TestCodeGraphIntegration:
         seg_syms = [s for s in analysis.symbols if s.constructor_type == "Segment"]
         assert len(seg_syms) >= 2, f"Expected >=2 Segment symbols, got {len(seg_syms)}"
 
-        # Parse text.py to get segment symbols for semantic code
-        parser = T2CParser()
-        text_objs = parser.parse_string(text_files["text.py"])
-        seg_id_map = {}
-        for o in text_objs:
-            if o.get("type") == "Segment" and o.get("symbol"):
-                seg_id_map[o["data"]["id"]] = o["symbol"]
-
-        # entities.py: entity referencing first segment → 1 def, 1 ref
-        eref = EvidenceRef(segment_id="s1", segment_symbol=seg_id_map.get("s1", "seg_0001"),
-                           start=0, end=3, quote_hash=_sha256("ABC"))
+        # entities.py: entity with evidence ref → 1 def, ≥1 ref (bare Name)
+        eref = EvidenceRef(segment_id="s1", start=0, end=3, quote_hash=_sha256("ABC"))
         ent = Entity(id="e1", name="Test", kind="person", evidence_refs=[eref])
-        sem_files = gen.generate_semantic_code_v33(
-            [ent], external_symbols=seg_id_map, external_file=".text",
+        table = compute_symbol_table(doc=doc, segments=[seg1, seg2], entities=[ent])
+        ent_code = gen._generate_type_file_v33(
+            ".entities", [ent], ["Entity", "EvidenceRef"], table,
         )
-        ent_analysis = analyze_file(sem_files["entities.py"], "entities.py")
+        ent_analysis = analyze_file(ent_code, "entities.py")
         assert ent_analysis.total_definitions >= 1
-        # Should have references (segment symbol ref)
+        # Should have references (segment symbol bare Name)
         assert ent_analysis.total_references >= 1, (
             f"Expected >=1 references in entities.py, got {ent_analysis.total_references}"
         )
@@ -122,18 +119,18 @@ class TestCodeGraphIntegration:
                        total_length=100, block_count=1, created_at="2026-01-01T00:00:00Z")
         seg = Segment(id="s1", doc_id="d1", block_index=0, segment_type="sentence",
                       start_offset=0, end_offset=5, text_slice="hello", hash=_sha256("hello"))
-        eref = EvidenceRef(segment_id="s1", segment_symbol="seg_0001",
-                           start=0, end=3, quote_hash=_sha256("hel"))
+        eref = EvidenceRef(segment_id="s1", start=0, end=3, quote_hash=_sha256("hel"))
         ent = Entity(id="e1", name="Test", kind="person", evidence_refs=[eref])
 
+        table = compute_symbol_table(doc=doc, segments=[seg], entities=[ent])
         files = {}
-        files.update(gen.generate_text_code_v33(doc, [], [seg]))
-        files.update(gen.generate_semantic_code_v33(
-            [ent], external_symbols={"s1": "seg_0001"}, external_file=".text",
-        ))
+        files.update(gen.generate_text_code_v33(doc, [], [seg], symbols=table))
+        files["entities.py"] = gen._generate_type_file_v33(
+            ".entities", [ent], ["Entity", "EvidenceRef"], table,
+        )
         analyses = analyze_multi_file(files)
         cross = cross_file_reference_count(analyses)
-        # entities.py imports and uses seg_0001 from text.py → cross-file ref
+        # entities.py imports and uses the segment symbol from text.py
         assert cross >= 1, f"Expected >=1 cross-file refs, got {cross}"
 
 
@@ -148,7 +145,7 @@ class TestQualityGateV33:
         ]"""
         candidates = parse_compact_response(llm_output)
         segs = [_StubSegment("s1", "甄士隐住在姑苏城中。")]
-        objects, symbol_map, warnings = expand_and_assign_symbols(
+        objects, warnings = expand_candidates(
             candidates, segs, doc_id="hlm",
         )
 
@@ -202,7 +199,7 @@ class TestQualityGateV33:
         )
 
     def test_v33_code_passes_full_validation(self):
-        """v3.3 code must pass all validation layers."""
+        """v6.0 code must pass all validation layers."""
         raw_text = "甄士隐住在姑苏城中。姑苏是繁华之地。"
         cm = CorpusManager()
         doc, text = cm.ingest_text(raw_text, "ch01")
@@ -213,51 +210,51 @@ class TestQualityGateV33:
             bt = cm.get_block_text(doc, b, text)
             all_segs.extend(seg.segment_block(doc.id, b, bt))
 
-        gen = CodeGenerator(version="v3.3-flash")
-        text_files = gen.generate_text_code_v33(doc, blocks, all_segs)
-
-        parser = T2CParser()
-        text_objs = parser.parse_string(text_files["text.py"])
-
-        # Build external index
-        ext_index = {}
-        seg_id_map = {}
-        for o in text_objs:
-            sym = o.get("symbol")
-            if sym and o["type"] == "Segment":
-                ext_index[sym] = {"type": "Segment", "id": o["data"]["id"]}
-                seg_id_map[o["data"]["id"]] = sym
-
         # Create semantic objects
         seg0 = all_segs[0]
-        seg0_sym = seg_id_map.get(seg0.id, "seg_0000")
         eref = EvidenceRef(
-            segment_id=seg0.id, segment_symbol=seg0_sym,
+            segment_id=seg0.id,
             start=0, end=3, quote_hash=_sha256(seg0.text_slice[:3]),
         )
-        ent = Entity(id="ent1", name="甄士隐", kind="person", evidence_refs=[eref])
-        ent2 = Entity(id="ent2", name="姑苏", kind="location")
+        ent = Entity(id="ch01_ent_0001", name="甄士隐", kind="person", evidence_refs=[eref])
+        ent2 = Entity(id="ch01_ent_0002", name="姑苏", kind="location")
         claim = Claim(
-            id="clm1", subject="ent1", predicate="lives_in", object="ent2",
+            id="ch01_clm_0001", subject="ch01_ent_0001", predicate="lives_in", object="ch01_ent_0002",
             modality="asserted", polarity="positive",
             evidence_refs=[eref],
         )
 
-        sem_files = gen.generate_semantic_code_v33(
-            [ent, ent2, claim],
-            external_symbols=seg_id_map, external_file=".text",
+        # v6.0: one symbol table drives all files
+        table = compute_symbol_table(
+            doc=doc, blocks=blocks, segments=all_segs,
+            entities=[ent, ent2], claims=[claim],
+        )
+        gen = CodeGenerator()
+        files = gen.generate_multi_file_compilation(
+            doc, blocks, all_segs,
+            entities=[ent, ent2], claims=[claim],
         )
 
-        # Parse all files
+        # Parse all files back (text first so segment symbols are known)
+        parser = T2CParser()
+        text_objs = parser.parse_string(files["text.py"])
+
+        # Build external index for symbol-ref resolution
+        ext_index = {}
+        for o in text_objs:
+            sym = o.get("symbol")
+            if sym and o["type"] == "Segment":
+                ext_index[sym] = {"type": "Segment", "id": o["data"]["id"]}
+
         ent_parser = T2CParser(external_symbols=ext_index)
-        ent_objs = ent_parser.parse_string(sem_files["entities.py"])
+        ent_objs = ent_parser.parse_string(files["entities.py"])
         for o in ent_objs:
             sym = o.get("symbol")
             if sym and o["type"] == "Entity":
                 ext_index[sym] = {"type": "Entity", "id": o["data"]["id"]}
 
         clm_parser = T2CParser(external_symbols=ext_index)
-        clm_objs = clm_parser.parse_string(sem_files["claims.py"])
+        clm_objs = clm_parser.parse_string(files["claims.py"])
 
         all_objects = text_objs + ent_objs + clm_objs
         v = Validator(raw_text_store={doc.id: text})

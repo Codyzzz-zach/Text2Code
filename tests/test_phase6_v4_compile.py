@@ -24,7 +24,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from t2c.codegen import CodeGenerator
-from t2c.compact_candidate import expand_and_assign_symbols, parse_compact_response
+from t2c.compact_candidate import parse_compact_response
 from t2c.compile_target import compile_to_knowledge_code
 from t2c.corpus import CorpusManager
 from t2c.ontology import (
@@ -230,9 +230,9 @@ class TestMultiFileCompilation:
             for n in ast.parse(text_src).body
             if isinstance(n, ast.Assign)
         }
-        # P4-2: when emit_symbol_refs=False (default), no cross-file imports
-        # are emitted because they would be dead imports (symbols not used).
-        # Verify the generated code is valid Python without dead imports.
+        # v6.0: evidence_refs produce bare-Name segment_symbol refs, backed
+        # by live cross-file imports. Every import must point to a real
+        # symbol in the target module.
         ent_src = (pkg / "entities.py").read_text(encoding="utf-8")
         ent_imports = {
             a.name
@@ -240,8 +240,14 @@ class TestMultiFileCompilation:
             if isinstance(n, ast.ImportFrom) and n.module == "text" and n.level == 1
             for a in n.names
         }
-        # No imports from .text when emit_symbol_refs=False
-        assert not ent_imports, f"entities.py should NOT import from .text when emit_symbol_refs=False — got {ent_imports}"
+        assert ent_imports, (
+            f"entities.py should import segment symbols from .text "
+            f"(entity has evidence_refs)\n{ent_src}"
+        )
+        assert ent_imports <= text_symbols, (
+            f"entities.py imports symbols not defined in text.py: "
+            f"{ent_imports - text_symbols}"
+        )
         clm_src = (pkg / "claims.py").read_text(encoding="utf-8")
         clm_ent_imports = {
             a.name
@@ -249,7 +255,15 @@ class TestMultiFileCompilation:
             if isinstance(n, ast.ImportFrom) and n.module == "entities" and n.level == 1
             for a in n.names
         }
-        assert not clm_ent_imports, f"claims.py should NOT import from .entities when emit_symbol_refs=False — got {clm_ent_imports}"
+        ent_symbols = {
+            n.targets[0].id
+            for n in ast.parse(ent_src).body
+            if isinstance(n, ast.Assign)
+        }
+        assert clm_ent_imports, (
+            f"claims.py should import entity symbols from .entities\n{clm_src}"
+        )
+        assert clm_ent_imports <= ent_symbols
 
     def test_coverage_py_is_generated(self, tmp_path):
         text = "爱丽丝在火车站。"
@@ -357,24 +371,24 @@ class TestLocateQuoteAmbiguity:
 
 
 class TestChineseNameNormalization:
-    """v4.0: Chinese names with ASCII parts get a readable slug; pure CJK gets hash."""
+    """v6.0: Chinese names with ASCII parts get a readable slug; pure CJK gets hash."""
 
     def test_pure_chinese_name_gets_hash_fallback(self):
-        from t2c.codegen import CodeGenerator
-        norm = CodeGenerator._normalize_name("爱丽丝")
+        from t2c.symbols import _normalize_name
+        norm = _normalize_name("爱丽丝")
         assert norm is None  # no ASCII, fall back to hash
 
     def test_mixed_chinese_english_uses_ascii_part(self):
-        from t2c.codegen import CodeGenerator
-        norm = CodeGenerator._normalize_name("爱丽丝 Alice")
+        from t2c.symbols import _normalize_name
+        norm = _normalize_name("爱丽丝 Alice")
         assert norm == "alice", f"Expected 'alice' from '爱丽丝 Alice', got {norm!r}"
 
     def test_ascii_name_normalized(self):
-        from t2c.codegen import CodeGenerator
-        norm = CodeGenerator._normalize_name("Alice Smith")
+        from t2c.symbols import _normalize_name
+        norm = _normalize_name("Alice Smith")
         assert norm == "alice_smith"
 
     def test_pure_ascii_with_spaces(self):
-        from t2c.codegen import CodeGenerator
-        norm = CodeGenerator._normalize_name("Zhen Shi Yin")
+        from t2c.symbols import _normalize_name
+        norm = _normalize_name("Zhen Shi Yin")
         assert norm == "zhen_shi_yin"

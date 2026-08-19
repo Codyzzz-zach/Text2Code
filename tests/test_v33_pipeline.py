@@ -23,8 +23,7 @@ def _sha256(text: str) -> str:
 
 def test_multi_file_codegen_parser_validator_roundtrip():
     """Full pipeline: codegen → parser → validator across text/entities/claims."""
-    # v3.3 mode: emit symbol refs in EvidenceRef (opt-in via flag)
-    gen = CodeGenerator(version="v3.3-flash", emit_symbol_refs=True)
+    gen = CodeGenerator()
 
     # --- Build text code ---
     doc = Document(
@@ -39,26 +38,8 @@ def test_multi_file_codegen_parser_validator_roundtrip():
         end_offset=len(seg_text), text_slice=seg_text,
         hash=_sha256(seg_text),
     )
-    text_files = gen.generate_text_code_v33(doc, [], [seg])
-    text_code = text_files["text.py"]
-
-    # --- Parse text.py to get segment symbols ---
-    text_parser = T2CParser()
-    text_objects = text_parser.parse_string(text_code)
-    # Build external symbol index: symbol_name → {type, id}
-    ext_index: dict[str, dict[str, str]] = {}
-    for obj in text_objects:
-        sym = obj.get("symbol")
-        if sym and obj.get("type") == "Segment":
-            ext_index[sym] = {"type": "Segment", "id": obj["data"]["id"]}
-    # Verify segment symbol was captured
-    assert len(ext_index) >= 1, "No segment symbols found in text.py"
-    seg_symbol = list(ext_index.keys())[0]
-    seg_id = ext_index[seg_symbol]["id"]
-
-    # --- Build semantic code (entities + claims) ---
     eref = EvidenceRef(
-        segment_id=seg_id, segment_symbol=seg_symbol,
+        segment_id=seg.id,
         start=0, end=3, quote_hash=_sha256(seg_text[:3]),
     )
     ent_zhen = Entity(id="ent1", name="甄士隐", kind="person", evidence_refs=[eref])
@@ -68,15 +49,31 @@ def test_multi_file_codegen_parser_validator_roundtrip():
         modality="asserted", polarity="positive",
         evidence_refs=[eref],
     )
-    semantic_files = gen.generate_semantic_code_v33(
-        [ent_zhen, ent_gusu, claim],
-        external_symbols={seg_id: seg_symbol},
-        external_file=".text",
+
+    # v6.0: one symbol table drives all files
+    from t2c.symbols import compute_symbol_table
+    table = compute_symbol_table(
+        doc=doc, segments=[seg], entities=[ent_zhen, ent_gusu], claims=[claim],
+    )
+    text_files = gen.generate_text_code_v33(doc, [], [seg], symbols=table)
+    entities_code = gen._generate_type_file_v33(
+        ".entities", [ent_zhen, ent_gusu], ["Entity", "EvidenceRef"], table,
+    )
+    claims_code = gen._generate_type_file_v33(
+        ".claims", [claim], ["Claim", "EvidenceRef"], table,
     )
 
+    # --- Parse text.py to get segment symbols ---
+    text_parser = T2CParser()
+    text_objects = text_parser.parse_string(text_files["text.py"])
+    ext_index: dict[str, dict[str, str]] = {}
+    for obj in text_objects:
+        sym = obj.get("symbol")
+        if sym and obj.get("type") == "Segment":
+            ext_index[sym] = {"type": "Segment", "id": obj["data"]["id"]}
+    assert len(ext_index) >= 1, "No segment symbols found in text.py"
+
     # --- Parse entities.py with external symbol index ---
-    entities_code = semantic_files.get("entities.py", "")
-    assert entities_code, "entities.py not generated"
     entities_parser = T2CParser(external_symbols=ext_index)
     entities_objects = entities_parser.parse_string(entities_code)
     assert len(entities_objects) >= 2, f"Expected >=2 entities, got {len(entities_objects)}"
@@ -88,24 +85,23 @@ def test_multi_file_codegen_parser_validator_roundtrip():
             ext_index[sym] = {"type": "Entity", "id": obj["data"]["id"]}
 
     # --- Parse claims.py with both segment and entity external symbols ---
-    claims_code = semantic_files.get("claims.py", "")
-    assert claims_code, "claims.py not generated"
     claims_parser = T2CParser(external_symbols=ext_index)
     claims_objects = claims_parser.parse_string(claims_code)
     assert len(claims_objects) >= 1, f"Expected >=1 claim, got {len(claims_objects)}"
 
     # --- Verify symbol refs in parsed objects ---
-    # Claims should have __symbol_refs__ for subject and object
+    # v6.0: bare Names live in the *_symbol fields; FK fields stay strings
     claim_obj = claims_objects[0]
     assert claim_obj["type"] == "Claim"
+    assert claim_obj["data"]["subject"] == "ent1"  # FK stays a string id
     refs = claim_obj.get("__symbol_refs__", {})
-    assert "subject" in refs, f"No subject symbol ref in claim: {refs}"
-    assert "object" in refs, f"No object symbol ref in claim: {refs}"
+    assert "subject_symbol" in refs, f"No subject_symbol ref in claim: {refs}"
+    assert "object_symbol" in refs, f"No object_symbol ref in claim: {refs}"
 
     # EvidenceRef should reference segment symbol
     entity_obj = entities_objects[0]
     entity_refs = entity_obj.get("__symbol_refs__", {})
-    seg_ref_paths = [p for p in entity_refs if "segment" in p]
+    seg_ref_paths = [p for p in entity_refs if "segment_symbol" in p]
     assert seg_ref_paths, f"No segment symbol ref in entity: {entity_refs}"
 
     # --- Validate everything together ---
@@ -116,11 +112,10 @@ def test_multi_file_codegen_parser_validator_roundtrip():
 
 
 def test_codegen_v33_output_contains_symbol_refs():
-    """Generated v3.3 code must contain real Python symbol references."""
-    # v3.3 mode: emit symbol refs in EvidenceRef (opt-in via flag)
-    gen = CodeGenerator(version="v3.3-flash", emit_symbol_refs=True)
+    """Generated v6.0 code must contain real Python symbol references."""
+    gen = CodeGenerator()
     seg = Segment(
-        id="seg1", doc_id="doc1", block_index=0,
+        id="doc1_seg_0001", doc_id="doc1", block_index=0,
         segment_type="sentence", start_offset=0, end_offset=9,
         text_slice="甄士隐住在姑苏", hash=_sha256("甄士隐住在姑苏"),
     )
@@ -129,39 +124,26 @@ def test_codegen_v33_output_contains_symbol_refs():
         id="doc1", source_path="t.txt", raw_text_hash=_sha256("x"),
         total_length=100, block_count=1, created_at="2026-01-01T00:00:00Z",
     )
+    from t2c.symbols import compute_symbol_table
     text_files = gen.generate_text_code_v33(doc, [], [seg])
-    text_code = text_files["text.py"]
 
     # text.py must use assignment format
-    assert " = Segment(" in text_code, "text.py missing segment assignment"
+    assert "seg_0001 = Segment(" in text_files["text.py"]
 
-    # Parse text.py to get actual segment symbol
-    text_parser = T2CParser()
-    text_objs = text_parser.parse_string(text_code)
-    seg_sym = None
-    seg_id = None
-    for o in text_objs:
-        if o.get("type") == "Segment":
-            seg_sym = o["symbol"]
-            seg_id = o["data"]["id"]
-            break
-    assert seg_sym, "No segment symbol found"
-    assert seg_id, "No segment ID found"
-
-    eref = EvidenceRef(segment_id=seg_id, segment_symbol=seg_sym,
+    eref = EvidenceRef(segment_id="doc1_seg_0001",
                        start=0, end=3, quote_hash=_sha256("甄士隐"))
     ent = Entity(id="ent1", name="甄士隐", kind="person", evidence_refs=[eref])
 
-    sem_files = gen.generate_semantic_code_v33(
-        [ent], external_symbols={seg_id: seg_sym}, external_file=".text",
+    table = compute_symbol_table(doc=doc, segments=[seg], entities=[ent])
+    entities_code = gen._generate_type_file_v33(
+        ".entities", [ent], ["Entity", "EvidenceRef"], table,
     )
-    entities_code = sem_files.get("entities.py", "")
 
-    # entities.py must import segment symbol and use it in EvidenceRef
-    assert f"from .text import {seg_sym}" in entities_code, f"Missing segment import for {seg_sym}"
-    assert f"segment={seg_sym}" in entities_code, f"Missing segment symbol ref {seg_sym}"
-    # id field must still be a string literal (not a symbol ref)
-    assert "id=" in entities_code, "id field should be a string literal"
+    # entities.py must import the segment symbol and use it as a bare Name
+    assert "from .text import seg_0001" in entities_code
+    assert "segment_symbol=seg_0001" in entities_code
+    # FK field stays a string literal (data face)
+    assert "segment_id='doc1_seg_0001'" in entities_code
 
 
 def test_evidence_ref_keyword_maps_to_segment_id():

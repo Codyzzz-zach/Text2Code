@@ -125,7 +125,7 @@ class TestCodegenVersion:
         gen = CodeGenerator()
         ent = Entity(id="e1", name="x", kind="person")
         code = gen.generate_knowledge_code([ent])
-        assert "v4.1" in code
+        assert "v6.0" in code
 
     def test_custom_version(self):
         from t2c.ontology import Entity
@@ -151,4 +151,4 @@ class TestCodegenVersion:
             start_offset=0, end_offset=1, text_slice="x", hash=_sha256("x"),
         )
         code = gen.generate_segments_code([seg])
-        assert "v4.1" in code
+        assert "v6.0" in code
