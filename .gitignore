@@ -43,7 +43,6 @@ output_code/*
 !output_code/.gitkeep
 output_code_v5*/
 .codegraph/
-optimizer-md/
 
 # Logs
 *.log

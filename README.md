@@ -269,9 +269,8 @@ Text2Code/
 
 | Version | Document | Key Innovation |
 |:--------|:---------|:---------------|
-| v4.0 | [t2c_design_v4.0.md](spec/t2c_design_v4.0.md) | Compiler model; CodeGraph-native output; 12-gate validation |
-| v3.3 | [t2c_design_v3.3.md](spec/t2c_design_v3.3.md) | Symbol assignment; cross-file references; compact protocol |
-| v3.0–v3.2 | [archive/](spec/archive/) | Graph-based knowledge extraction evolution |
+| v6.0 | [t2c_design_v6.0.md](spec/t2c_design_v6.0.md) | Boundary re-convergence: single text→code link; CodeGraph capability matrix acceptance |
+| v5.0 and earlier | [archive/](spec/archive/) | Structure-first / compiler model / symbol assignment / graph evolution |
 
 <p align="right">(<a href="#readme-top">back to top</a>)</p>
 

@@ -269,9 +269,8 @@ Text2Code/
 
 | 版本 | 文档 | 核心创新 |
 |:-----|:-----|:---------|
-| v4.0 | [t2c_design_v4.0.md](spec/t2c_design_v4.0.md) | 编译器模型；CodeGraph 原生输出；12-gate 校验 |
-| v3.3 | [t2c_design_v3.3.md](spec/t2c_design_v3.3.md) | 符号分配；跨文件引用；紧凑协议 |
-| v3.0–v3.2 | [archive/](spec/archive/) | 图谱知识提取演进 |
+| v6.0 | [t2c_design_v6.0.md](spec/t2c_design_v6.0.md) | 边界再收敛：单一环节 text→code；CodeGraph 能力矩阵验收 |
+| v5.0 及以前 | [archive/](spec/archive/) | 结构先行/编译器模型/符号分配/图谱演进 |
 
 <p align="right">(<a href="#readme-top">回到顶部</a>)</p>
 
